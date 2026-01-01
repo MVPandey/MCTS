@@ -1460,6 +1460,7 @@ dependencies = [
     { name = "pydantic-ai" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
@@ -1471,6 +1472,7 @@ requires-dist = [
     { name = "pydantic-ai", specifier = ">=1.39.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "ruff", specifier = ">=0.14.10" },
+    { name = "tenacity", specifier = ">=9.1.2" },
 ]
 
 [[package]]

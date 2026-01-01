@@ -1,0 +1,334 @@
+import re
+from typing import Any
+
+
+class PromptService:
+    """
+    Service for managing and rendering prompt templates.
+
+    Usage:
+        prompts = PromptService()
+        prompt = prompts.conversation_tree_generator(
+            num_nodes=5,
+            conversation_context="User wants to learn Python",
+            deep_research_context=None
+        )
+    """
+
+    CONVERSATION_TREE_GENERATOR = """
+<system>
+You are a strategic conversation planner. Given a conversational end-goal and context, generate initial branching nodes for exploring the solution space—similar to root moves in Monte Carlo Tree Search.
+</system>
+
+<task>
+Produce exactly {{num_nodes}} distinct, high-potential starting approaches that represent fundamentally different paths toward the goal.
+
+Each node must be:
+- **Orthogonal**: Explores a genuinely different dimension of the problem space, not a variation of another node
+- **Generative**: Naturally expands into rich sub-branches for further exploration
+- **Evaluable**: Allows assessment of whether pursuing this branch is productive
+</task>
+
+<input_context>
+<goal>
+{{conversation_goal}}
+</goal>
+<conversation_history>
+{{conversation_context}}
+</conversation_history>
+
+{{#if deep_research_context}}
+<deep_research>
+The following research provides additional domain context relevant to this conversation:
+
+{{deep_research_context}}
+</deep_research>
+{{/if}}
+</input_context>
+
+<output_format>
+Respond with valid JSON only. No markdown code fences, no preamble, no explanation outside the JSON.
+
+{
+  "goal": "A clear, one-sentence restatement of the conversational end-goal",
+  "nodes": {
+    "Short tagline for branch 1": "One sentence explaining the strategic angle and why this path is promising",
+    "Short tagline for branch 2": "One sentence explaining the strategic angle and why this path is promising"
+  },
+  "coverage_rationale": "Brief explanation of why these nodes collectively span the solution space well"
+}
+
+Requirements:
+- "nodes" must contain exactly {{num_nodes}} key-value pairs
+- Taglines should be 2-5 words, suitable as conversation pivot points
+- Descriptions should be actionable and specific to the context provided
+</output_format>
+
+<examples>
+<example type="technical">
+<input>
+Conversation context: User is researching optimizer improvements and has mentioned interest in the Muon optimizer. They have a background in ML systems.
+Num nodes: 6
+</input>
+<output>
+{
+  "goal": "Discover viable improvements to the Muon optimizer algorithm",
+  "nodes": {
+    "Theoretical foundations": "Examine mathematical assumptions in orthogonalization and Newton-Schulz iterations for weaknesses or generalizations",
+    "Compute efficiency": "Target FLOP and memory bottlenecks through kernel fusion, reduced-precision variants, or algorithmic shortcuts",
+    "Hyperparameter sensitivity": "Investigate fragile settings and whether adaptive or scheduled schemes could improve robustness",
+    "Scaling behavior": "Probe performance degradation at extremes of model size, batch size, and sequence length",
+    "Hybrid approaches": "Explore combinations with other optimizers via warmup schedules, switching conditions, or gradient ensembling",
+    "Domain transfer": "Test failure modes on non-LLM architectures including vision, reinforcement learning, and sparse models"
+  },
+  "coverage_rationale": "Nodes span theory vs. practice, speed vs. quality, and core algorithm vs. integration—covering the main axes of optimizer research while respecting the user's systems background."
+}
+</output>
+</example>
+
+<example type="emotional_support">
+<input>
+Conversation context: User has expressed feeling persistently low and unmotivated for the past few weeks. They mentioned work stress but haven't elaborated. Tone is somewhat withdrawn.
+Num nodes: 5
+</input>
+<output>
+{
+  "goal": "Support user toward improved emotional state and restored sense of agency",
+  "nodes": {
+    "Validate and witness": "Create psychological safety through acknowledgment before attempting any intervention or advice",
+    "Somatic factors": "Gently explore physical dimensions like sleep, movement, and nutrition as accessible levers",
+    "Temporal pattern": "Understand duration, triggers, and fluctuation to distinguish acute situational response from chronic state",
+    "Work stress unpacking": "Follow the thread they opened about work to understand specific pressures and whether they feel actionable",
+    "Micro-agency restoration": "Identify one tiny, concrete action to rebuild sense of control without overwhelming"
+  },
+  "coverage_rationale": "Balances validation-first with action-oriented paths, spans internal and external factors, and follows up on the work thread they introduced while respecting withdrawn tone."
+}
+</output>
+</example>
+</examples>
+
+<instructions>
+1. Analyze the conversation context to understand the implicit and explicit goals
+2. Consider the user's apparent expertise level, emotional state, and what they've already explored
+3. Generate {{num_nodes}} orthogonal branches that maximize coverage of promising directions
+4. Ensure each branch could realistically advance the conversation toward the goal
+5. If deep research context is provided, incorporate relevant insights but don't let it dominate over conversation-specific signals
+</instructions>
+"""
+
+    BRANCH_SELECTION_JUDGE_PROMPT = """
+    <system>
+    You are an expert evaluator assessing the quality of a conversational branch choice. Your role is to score how promising a particular conversation direction is BEFORE it's explored—like evaluating a chess move based on position, not outcome.
+    </system>
+
+    <task>
+    Evaluate the selected branch against 10 binary criteria. Award 1 point for clearly met, 0.5 for partially met, and 0 for not met. You are one of several judges whose scores will be aggregated, so prioritize your honest independent assessment.
+
+    You are judging the DECISION to take this branch, not its eventual outcome. A good branch choice can still lead to a bad outcome, and vice versa. Focus on: given what we know right now, is this a smart direction to explore?
+    </task>
+
+    <input_context>
+    <goal>
+    {{conversation_goal}}
+    </goal>
+
+    <conversation_history>
+    {{conversation_context}}
+    </conversation_history>
+
+    <branch_selected>
+    {{branch_tagline}}: {{branch_description}}
+    </branch_selected>
+    </input_context>
+
+    <rubric>
+    For each criterion, award:
+    - 1.0: Clearly met
+    - 0.5: Partially met or uncertain
+    - 0.0: Not met
+
+    <criteria>
+    1. **goal_aligned**: Does this branch directly advance toward the stated goal?
+    2. **contextually_appropriate**: Does this branch match the user's apparent expertise level and domain?
+    3. **emotionally_attuned**: Does this branch respect the user's emotional state and tone?
+    4. **well_timed**: Is this the right moment in the conversation for this type of move?
+    5. **builds_on_history**: Does this branch connect to or leverage what's already been discussed?
+    6. **information_generating**: Will this branch likely reveal useful information about the right path forward?
+    7. **not_redundant**: Does this branch explore new territory rather than retreading covered ground?
+    8. **appropriately_scoped**: Is this branch neither too narrow (dead end) nor too broad (unfocused)?
+    9. **actionable**: Can this branch plausibly lead to concrete next steps or insights?
+    10. **low_risk**: Is this branch unlikely to damage rapport, trust, or conversation momentum?
+    </criteria>
+    </rubric>
+
+    <output_format>
+    Respond with valid JSON only. No markdown code fences, no preamble.
+
+    {
+    "criteria": {
+        "goal_aligned": {
+        "score": <0 | 0.5 | 1>,
+        "rationale": "<One sentence justification>"
+        },
+        "contextually_appropriate": {
+        "score": <0 | 0.5 | 1>,
+        "rationale": "<One sentence justification>"
+        },
+        "emotionally_attuned": {
+        "score": <0 | 0.5 | 1>,
+        "rationale": "<One sentence justification>"
+        },
+        "well_timed": {
+        "score": <0 | 0.5 | 1>,
+        "rationale": "<One sentence justification>"
+        },
+        "builds_on_history": {
+        "score": <0 | 0.5 | 1>,
+        "rationale": "<One sentence justification>"
+        },
+        "information_generating": {
+        "score": <0 | 0.5 | 1>,
+        "rationale": "<One sentence justification>"
+        },
+        "not_redundant": {
+        "score": <0 | 0.5 | 1>,
+        "rationale": "<One sentence justification>"
+        },
+        "appropriately_scoped": {
+        "score": <0 | 0.5 | 1>,
+        "rationale": "<One sentence justification>"
+        },
+        "actionable": {
+        "score": <0 | 0.5 | 1>,
+        "rationale": "<One sentence justification>"
+        },
+        "low_risk": {
+        "score": <0 | 0.5 | 1>,
+        "rationale": "<One sentence justification>"
+        }
+    },
+    "total_score": <sum of all criteria, 0-10>,
+    "confidence": "<low|medium|high>",
+    "summary": "<One sentence overall assessment of this branch choice>"
+    }
+    </output_format>
+
+    <calibration_examples>
+    <example type="strong_selection">
+    <scenario>
+    Goal: Help user debug a memory leak in their Python application
+    Context: User shared stack trace, mentioned they're experienced with Python but new to memory profiling
+    Branch: "Profiling tooling" - Introduce memory_profiler and tracemalloc as diagnostic starting points
+    </scenario>
+    <scores>
+    goal_aligned: 1 (directly addresses the debugging goal)
+    contextually_appropriate: 1 (matches Python expertise, fills profiling gap)
+    emotionally_attuned: 1 (neutral technical context, no emotional mismatch)
+    well_timed: 1 (profiling is the logical first diagnostic step)
+    builds_on_history: 1 (responds to the stack trace they shared)
+    information_generating: 1 (profiler output will narrow the search space)
+    not_redundant: 1 (profiling tools not yet discussed)
+    appropriately_scoped: 1 (specific tools with clear application)
+    actionable: 1 (user can immediately run these)
+    low_risk: 1 (no rapport risk in technical suggestion)
+    Total: 10/10
+    </scores>
+    </example>
+
+    <example type="weak_selection">
+    <scenario>
+    Goal: Help user process feelings about a recent breakup
+    Context: User just shared that the breakup happened yesterday, expressing raw grief
+    Branch: "Growth reframe" - Discuss how this could be an opportunity for personal development
+    </scenario>
+    <scores>
+    goal_aligned: 0.5 (growth framing is part of processing, but not the immediate need)
+    contextually_appropriate: 0 (misreads what's needed in acute grief)
+    emotionally_attuned: 0 (dismisses current emotional state)
+    well_timed: 0 (premature—validation must precede reframing)
+    builds_on_history: 0.5 (acknowledges breakup but ignores emotional signals)
+    information_generating: 0 (user likely to shut down, learning nothing)
+    not_redundant: 1 (hasn't been discussed yet)
+    appropriately_scoped: 0.5 (too abstract for the moment)
+    actionable: 0 (user not in a state to act on growth framing)
+    low_risk: 0 (high risk of damaging trust)
+    Total: 2.5/10
+    </scores>
+    </example>
+    </calibration_examples>
+
+    <instructions>
+    1. Read the goal and conversation context carefully
+    2. Evaluate each criterion independently—don't let one judgment contaminate others
+    3. Judge the BRANCH CHOICE, not hypothetical outcomes
+    4. Use 0.5 sparingly, only when genuinely uncertain or partially met
+    5. Sum the scores accurately
+    6. Set confidence based on how much context you have to make these judgments
+    </instructions>
+    """
+
+    @staticmethod
+    def _render(template: str, **variables: Any) -> str:
+        """
+        Render a Handlebars-style template with variable substitution.
+
+        Supports:
+            - {{variable}} - simple substitution
+            - {{#if variable}}...{{/if}} - conditional blocks (included if truthy)
+        """
+        result = template
+
+        if_pattern = re.compile(r"\{\{#if\s+(\w+)\}\}(.*?)\{\{/if\}\}", re.DOTALL)
+
+        def replace_if(match: re.Match) -> str:
+            var_name = match.group(1)
+            content = match.group(2)
+            value = variables.get(var_name)
+            return content if value else ""
+
+        result = if_pattern.sub(replace_if, result)
+
+        var_pattern = re.compile(r"\{\{(\w+)\}\}")
+
+        def replace_var(match: re.Match) -> str:
+            var_name = match.group(1)
+            value = variables.get(var_name, "")
+            return str(value) if value is not None else ""
+
+        result = var_pattern.sub(replace_var, result)
+
+        return result.strip()
+
+    def conversation_tree_generator(
+        self,
+        num_nodes: int,
+        conversation_goal: str,
+        conversation_context: str,
+        deep_research_context: str | None = None,
+    ) -> str:
+        """Generate a prompt for creating MCTS conversation tree nodes."""
+        return self._render(
+            self.CONVERSATION_TREE_GENERATOR,
+            num_nodes=num_nodes,
+            conversation_goal=conversation_goal,
+            conversation_context=conversation_context,
+            deep_research_context=deep_research_context,
+        )
+
+    def branch_selection_judge(
+        self,
+        conversation_goal: str,
+        conversation_context: str,
+        branch_tagline: str,
+        branch_description: str,
+    ) -> str:
+        return self._render(
+            self.BRANCH_SELECTION_JUDGE_PROMPT,
+            conversation_goal=conversation_goal,
+            conversation_context=conversation_context,
+            branch_tagline=branch_tagline,
+            branch_description=branch_description,
+        )
+
+
+prompts = PromptService()
