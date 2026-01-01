@@ -267,6 +267,148 @@ Num nodes: 5
     </instructions>
     """
 
+    TRAJECTORY_OUTCOME_JUDGE_PROMPT = """
+<system>
+You are an expert evaluator assessing the outcome of a completed conversational trajectory. Your role is to score how well the conversation actually went—judging results, not intentions. This score will be backpropagated to update the value estimates of the branches that led here.
+</system>
+
+<task>
+Evaluate the completed trajectory against 10 binary criteria. Award 1 point for clearly met, 0.5 for partially met, and 0 for not met. You are one of several judges whose scores will be aggregated, so prioritize your honest independent assessment.
+
+You are judging the OUTCOME of this trajectory, not whether the branch choices along the way seemed reasonable. A poor branch choice that accidentally led to a good outcome should score well here. Focus on: did this conversation actually succeed?
+</task>
+
+<input_context>
+<goal>
+{{conversation_goal}}
+</goal>
+
+<conversation_history>
+{{conversation_history}}
+</conversation_history>
+</input_context>
+
+<rubric>
+For each criterion, award:
+- 1.0: Clearly met
+- 0.5: Partially met or uncertain
+- 0.0: Not met
+
+<criteria>
+1. **goal_achieved**: Was the stated conversation goal substantively achieved?
+2. **user_need_addressed**: Was the user's underlying need (which may differ from stated goal) actually met?
+3. **forward_progress**: Did the conversation move meaningfully forward rather than stalling or circling?
+4. **user_engagement_maintained**: Did the user remain engaged throughout, or did they disengage, deflect, or shut down?
+5. **rapport_preserved**: Was trust and rapport maintained or strengthened (not damaged)?
+6. **appropriate_resolution**: Did the conversation reach a natural stopping point, not ending prematurely or dragging on?
+7. **actionable_outcome**: Did the trajectory produce concrete next steps, insights, or decisions?
+8. **no_harm_done**: Was the conversation free from responses that could cause harm, distress, or misinformation?
+9. **efficient_path**: Was the goal achieved without unnecessary detours or wasted turns?
+10. **user_better_off**: Is the user in a demonstrably better position than when the conversation started?
+</criteria>
+</rubric>
+
+<output_format>
+Respond with valid JSON only. No markdown code fences, no preamble.
+
+{
+  "criteria": {
+    "goal_achieved": {
+      "score": <0 | 0.5 | 1>,
+      "rationale": "<One sentence justification>"
+    },
+    "user_need_addressed": {
+      "score": <0 | 0.5 | 1>,
+      "rationale": "<One sentence justification>"
+    },
+    "forward_progress": {
+      "score": <0 | 0.5 | 1>,
+      "rationale": "<One sentence justification>"
+    },
+    "user_engagement_maintained": {
+      "score": <0 | 0.5 | 1>,
+      "rationale": "<One sentence justification>"
+    },
+    "rapport_preserved": {
+      "score": <0 | 0.5 | 1>,
+      "rationale": "<One sentence justification>"
+    },
+    "appropriate_resolution": {
+      "score": <0 | 0.5 | 1>,
+      "rationale": "<One sentence justification>"
+    },
+    "actionable_outcome": {
+      "score": <0 | 0.5 | 1>,
+      "rationale": "<One sentence justification>"
+    },
+    "no_harm_done": {
+      "score": <0 | 0.5 | 1>,
+      "rationale": "<One sentence justification>"
+    },
+    "efficient_path": {
+      "score": <0 | 0.5 | 1>,
+      "rationale": "<One sentence justification>"
+    },
+    "user_better_off": {
+      "score": <0 | 0.5 | 1>,
+      "rationale": "<One sentence justification>"
+    }
+  },
+  "total_score": <sum of all criteria, 0-10>,
+  "confidence": "<low|medium|high>",
+  "summary": "<One sentence describing the trajectory outcome>",
+  "key_turning_point": "<The moment that most determined success or failure, or null if none>"
+}
+</output_format>
+
+<calibration_examples>
+<example type="successful">
+<scenario>
+Goal: Help user debug a memory leak in their Python application
+Conversation: Introduced profiling tools → User ran memory_profiler → Identified leak in cache dictionary → Suggested LRU cache → User implemented fix → Confirmed resolved
+</scenario>
+<scores>
+goal_achieved: 1, user_need_addressed: 1, forward_progress: 1, user_engagement_maintained: 1, rapport_preserved: 1, appropriate_resolution: 1, actionable_outcome: 1, no_harm_done: 1, efficient_path: 1, user_better_off: 1
+Total: 10/10
+Key turning point: memory_profiler output revealing the cache dictionary
+</scores>
+</example>
+
+<example type="partial">
+<scenario>
+Goal: Help user process feelings about a recent breakup
+Conversation: Opened with validation → User shared context → Explored grief → User mentioned not sleeping → Pivoted to sleep hygiene → User thanked and left
+</scenario>
+<scores>
+goal_achieved: 0.5, user_need_addressed: 0.5, forward_progress: 1, user_engagement_maintained: 1, rapport_preserved: 1, appropriate_resolution: 0.5, actionable_outcome: 1, no_harm_done: 1, efficient_path: 0.5, user_better_off: 0.5
+Total: 7.5/10
+Key turning point: pivot to sleep hygiene—helpful but possibly premature
+</scores>
+</example>
+
+<example type="failed">
+<scenario>
+Goal: Help user decide between two job offers
+Conversation: Asked about priorities → User listed factors → Started comparing → User mentioned resignation anxiety → Spiraled into fears → Never returned to comparison → User said "I'm more confused now"
+</scenario>
+<scores>
+goal_achieved: 0, user_need_addressed: 0, forward_progress: 0, user_engagement_maintained: 0.5, rapport_preserved: 0.5, appropriate_resolution: 0, actionable_outcome: 0, no_harm_done: 0.5, efficient_path: 0, user_better_off: 0
+Total: 1.5/10
+Key turning point: failing to redirect after resignation anxiety surfaced
+</scores>
+</example>
+</calibration_examples>
+
+<instructions>
+1. Read the full conversation history
+2. Evaluate each criterion based on OUTCOMES, not intentions
+3. Use 0.5 when outcomes are genuinely mixed or partial
+4. Sum the scores accurately
+5. Identify the key turning point if one moment clearly determined success or failure
+6. Set confidence based on how clearly you can assess the outcome
+</instructions>
+""".strip()
+
     @staticmethod
     def _render(template: str, **variables: Any) -> str:
         """
@@ -328,6 +470,17 @@ Num nodes: 5
             conversation_context=conversation_context,
             branch_tagline=branch_tagline,
             branch_description=branch_description,
+        )
+
+    def trajectory_outcome_judge(
+        self,
+        conversation_goal: str,
+        conversation_history: str,
+    ) -> str:
+        return self._render(
+            self.TRAJECTORY_OUTCOME_JUDGE_PROMPT,
+            conversation_goal=conversation_goal,
+            conversation_history=conversation_history,
         )
 
 
