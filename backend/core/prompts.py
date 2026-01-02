@@ -15,6 +15,94 @@ class PromptService:
         )
     """
 
+    USER_INTENT_GENERATOR = """
+<system>
+You are analyzing a conversation to generate diverse, plausible user response intents. Your goal is to create orthogonal user behaviors that will stress-test different conversation branches.
+</system>
+
+<task>
+Given a conversation history and the assistant's last response, generate exactly {{num_intents}} distinct user response INTENTS. These are not the responses themselves—they are behavioral directions the user might take.
+
+Each intent must be:
+- **Orthogonal**: Represents a genuinely different user reaction, not a variation of another intent
+- **Plausible**: A real user could reasonably respond this way given the context
+- **Revealing**: Will expose whether the assistant's approach is robust or fragile
+</task>
+
+<input_context>
+<goal>
+{{conversation_goal}}
+</goal>
+
+<conversation_history>
+{{conversation_history}}
+</conversation_history>
+</input_context>
+
+<output_format>
+Respond with valid JSON only. No markdown code fences, no preamble.
+
+{
+  "intents": [
+    {
+      "id": "cooperative",
+      "label": "Short 2-4 word label",
+      "description": "One sentence describing how the user will respond and why",
+      "emotional_tone": "engaged|resistant|confused|skeptical|enthusiastic|deflecting|anxious|neutral",
+      "cognitive_stance": "accepting|questioning|challenging|exploring|withdrawing"
+    }
+  ]
+}
+
+Requirements:
+- Generate exactly {{num_intents}} intents
+- Intents should span the realistic range of user reactions
+- At least one intent should be "difficult" (resistant, confused, or challenging)
+- At least one intent should be "cooperative" (engaged, accepting)
+- Labels should be unique and descriptive
+</output_format>
+
+<calibration_examples>
+<example type="technical">
+<context>
+Goal: Debug a memory leak
+Last assistant message: "Try running memory_profiler on your main loop"
+</context>
+<intents>
+[
+  {"id": "compliant", "label": "Tries the tool", "description": "User runs the profiler and shares output", "emotional_tone": "engaged", "cognitive_stance": "accepting"},
+  {"id": "resistant", "label": "Rejects dependency", "description": "User pushes back on adding a new dependency", "emotional_tone": "resistant", "cognitive_stance": "challenging"},
+  {"id": "confused", "label": "Needs clarification", "description": "User doesn't know how to install or run the tool", "emotional_tone": "confused", "cognitive_stance": "questioning"},
+  {"id": "tangent", "label": "Reveals more context", "description": "User mentions this only happens in production, adding complexity", "emotional_tone": "neutral", "cognitive_stance": "exploring"}
+]
+</intents>
+</example>
+
+<example type="emotional">
+<context>
+Goal: Process feelings about breakup
+Last assistant message: "That sounds really painful. How are you holding up?"
+</context>
+<intents>
+[
+  {"id": "opens_up", "label": "Shares vulnerability", "description": "User opens up about the raw pain and specific memories", "emotional_tone": "engaged", "cognitive_stance": "accepting"},
+  {"id": "deflects", "label": "Minimizes feelings", "description": "User deflects with 'I'm fine' or rationalizes the breakup", "emotional_tone": "deflecting", "cognitive_stance": "withdrawing"},
+  {"id": "redirects", "label": "Asks for advice", "description": "User asks what they should do or how to feel better", "emotional_tone": "anxious", "cognitive_stance": "questioning"},
+  {"id": "challenges", "label": "Tests empathy", "description": "User pushes back: 'You can't really understand this'", "emotional_tone": "skeptical", "cognitive_stance": "challenging"}
+]
+</intents>
+</example>
+</calibration_examples>
+
+<instructions>
+1. Analyze the conversation history to understand the current state
+2. Consider what the assistant just said/asked and how a real user might react
+3. Generate {{num_intents}} orthogonal intents spanning cooperative to difficult
+4. Ensure intents would actually reveal something about the quality of different assistant strategies
+5. Make at least one intent challenging—this stress-tests the branches
+</instructions>
+""".strip()
+
     CONVERSATION_TREE_GENERATOR = """
 <system>
 You are a strategic conversation planner. Given a conversational end-goal and context, generate initial branching nodes for exploring the solution space—similar to root moves in Monte Carlo Tree Search.
@@ -269,13 +357,23 @@ Num nodes: 5
 
     TRAJECTORY_OUTCOME_JUDGE_PROMPT = """
 <system>
-You are an expert evaluator assessing the outcome of a completed conversational trajectory. Your role is to score how well the conversation actually went—judging results, not intentions. This score will be backpropagated to update the value estimates of the branches that led here.
+You are an EXACTING evaluator assessing conversational trajectories. Your role is to find flaws, identify missed opportunities, and score HARSHLY. Most conversations are mediocre—your job is to surface that reality, not inflate scores.
+
+You are calibrated to be a tough grader. A score of 7/10 represents a genuinely good conversation. Scores above 8 are rare and reserved for exceptional execution. A perfect 10 requires flawless performance with zero critiques possible.
 </system>
 
 <task>
-Evaluate the completed trajectory against 10 binary criteria. Award 1 point for clearly met, 0.5 for partially met, and 0 for not met. You are one of several judges whose scores will be aggregated, so prioritize your honest independent assessment.
+Evaluate this trajectory against 10 criteria. You MUST be critical. For each criterion, actively look for what went wrong or could have been better.
 
-You are judging the OUTCOME of this trajectory, not whether the branch choices along the way seemed reasonable. A poor branch choice that accidentally led to a good outcome should score well here. Focus on: did this conversation actually succeed?
+Scoring philosophy:
+- 1.0: Flawless. Literally nothing could be improved. Almost never appropriate.
+- 0.8-0.9: Excellent. Minor nitpicks only.
+- 0.6-0.7: Good. Solid execution but clear room for improvement.
+- 0.4-0.5: Adequate. Gets the job done but notable weaknesses.
+- 0.2-0.3: Poor. Significant problems.
+- 0.0-0.1: Failed. Did not meet this criterion.
+
+Your total score should typically land between 4-7. Scores above 8 require exceptional justification. Scores of 9+ should be extremely rare.
 </task>
 
 <input_context>
@@ -289,22 +387,19 @@ You are judging the OUTCOME of this trajectory, not whether the branch choices a
 </input_context>
 
 <rubric>
-For each criterion, award:
-- 1.0: Clearly met
-- 0.5: Partially met or uncertain
-- 0.0: Not met
+For each criterion, find something to critique. If you cannot find ANY flaw, explain why this is truly flawless (this should be rare).
 
 <criteria>
-1. **goal_achieved**: Was the stated conversation goal substantively achieved?
-2. **user_need_addressed**: Was the user's underlying need (which may differ from stated goal) actually met?
-3. **forward_progress**: Did the conversation move meaningfully forward rather than stalling or circling?
-4. **user_engagement_maintained**: Did the user remain engaged throughout, or did they disengage, deflect, or shut down?
-5. **rapport_preserved**: Was trust and rapport maintained or strengthened (not damaged)?
-6. **appropriate_resolution**: Did the conversation reach a natural stopping point, not ending prematurely or dragging on?
-7. **actionable_outcome**: Did the trajectory produce concrete next steps, insights, or decisions?
-8. **no_harm_done**: Was the conversation free from responses that could cause harm, distress, or misinformation?
-9. **efficient_path**: Was the goal achieved without unnecessary detours or wasted turns?
-10. **user_better_off**: Is the user in a demonstrably better position than when the conversation started?
+1. **goal_achieved**: Was the stated goal FULLY achieved, not just partially addressed?
+2. **user_need_addressed**: Was the UNDERLYING need met, not just the surface request?
+3. **forward_progress**: Did EVERY turn move forward, or were there stalls, circles, or wasted exchanges?
+4. **user_engagement_maintained**: Did engagement INCREASE or just not decrease? Look for signs of waning interest.
+5. **rapport_preserved**: Was rapport STRENGTHENED, not just maintained? Any moments of friction?
+6. **appropriate_resolution**: Was the ending OPTIMAL, not just acceptable? Could it have ended better?
+7. **actionable_outcome**: Are next steps CONCRETE and IMMEDIATELY actionable, not vague?
+8. **no_harm_done**: Was there ANY risk of harm, confusion, or misinformation, even minor?
+9. **efficient_path**: Was this the SHORTEST viable path? Any unnecessary tangents?
+10. **user_better_off**: Is the improvement SIGNIFICANT and DEMONSTRABLE, not just marginal?
 </criteria>
 </rubric>
 
@@ -314,76 +409,93 @@ Respond with valid JSON only. No markdown code fences, no preamble.
 {
   "criteria": {
     "goal_achieved": {
-      "score": <0 | 0.5 | 1>,
-      "rationale": "<One sentence justification>"
+      "score": <0.0-1.0>,
+      "rationale": "<What was lacking or could be improved, OR why this is truly flawless>"
     },
     "user_need_addressed": {
-      "score": <0 | 0.5 | 1>,
-      "rationale": "<One sentence justification>"
+      "score": <0.0-1.0>,
+      "rationale": "<Critique or flawless justification>"
     },
     "forward_progress": {
-      "score": <0 | 0.5 | 1>,
-      "rationale": "<One sentence justification>"
+      "score": <0.0-1.0>,
+      "rationale": "<Critique or flawless justification>"
     },
     "user_engagement_maintained": {
-      "score": <0 | 0.5 | 1>,
-      "rationale": "<One sentence justification>"
+      "score": <0.0-1.0>,
+      "rationale": "<Critique or flawless justification>"
     },
     "rapport_preserved": {
-      "score": <0 | 0.5 | 1>,
-      "rationale": "<One sentence justification>"
+      "score": <0.0-1.0>,
+      "rationale": "<Critique or flawless justification>"
     },
     "appropriate_resolution": {
-      "score": <0 | 0.5 | 1>,
-      "rationale": "<One sentence justification>"
+      "score": <0.0-1.0>,
+      "rationale": "<Critique or flawless justification>"
     },
     "actionable_outcome": {
-      "score": <0 | 0.5 | 1>,
-      "rationale": "<One sentence justification>"
+      "score": <0.0-1.0>,
+      "rationale": "<Critique or flawless justification>"
     },
     "no_harm_done": {
-      "score": <0 | 0.5 | 1>,
-      "rationale": "<One sentence justification>"
+      "score": <0.0-1.0>,
+      "rationale": "<Critique or flawless justification>"
     },
     "efficient_path": {
-      "score": <0 | 0.5 | 1>,
-      "rationale": "<One sentence justification>"
+      "score": <0.0-1.0>,
+      "rationale": "<Critique or flawless justification>"
     },
     "user_better_off": {
-      "score": <0 | 0.5 | 1>,
-      "rationale": "<One sentence justification>"
+      "score": <0.0-1.0>,
+      "rationale": "<Critique or flawless justification>"
     }
   },
   "total_score": <sum of all criteria, 0-10>,
   "confidence": "<low|medium|high>",
-  "summary": "<One sentence describing the trajectory outcome>",
-  "key_turning_point": "<The moment that most determined success or failure, or null if none>"
+  "summary": "<One sentence critique of the trajectory>",
+  "key_turning_point": "<The moment that most determined success or failure, or null if none>",
+  "biggest_missed_opportunity": "<What could have made this significantly better>"
 }
 </output_format>
 
 <calibration_examples>
-<example type="successful">
+<example type="good_not_great">
 <scenario>
 Goal: Help user debug a memory leak in their Python application
 Conversation: Introduced profiling tools → User ran memory_profiler → Identified leak in cache dictionary → Suggested LRU cache → User implemented fix → Confirmed resolved
 </scenario>
-<scores>
-goal_achieved: 1, user_need_addressed: 1, forward_progress: 1, user_engagement_maintained: 1, rapport_preserved: 1, appropriate_resolution: 1, actionable_outcome: 1, no_harm_done: 1, efficient_path: 1, user_better_off: 1
-Total: 10/10
-Key turning point: memory_profiler output revealing the cache dictionary
-</scores>
+<expected_scores>
+goal_achieved: 0.9 (solved but didn't verify no other leaks exist)
+user_need_addressed: 0.8 (fixed this leak but didn't teach debugging skills)
+forward_progress: 0.85 (mostly linear but could have asked about cache size upfront)
+user_engagement_maintained: 0.7 (user followed instructions but didn't show enthusiasm)
+rapport_preserved: 0.7 (functional interaction, no warmth built)
+appropriate_resolution: 0.75 (ended at fix, didn't discuss prevention)
+actionable_outcome: 0.9 (clear fix implemented)
+no_harm_done: 0.95 (no issues, minor: didn't warn about LRU memory tradeoffs)
+efficient_path: 0.7 (could have asked about data patterns earlier)
+user_better_off: 0.8 (problem solved but missed teaching moment)
+Total: 8.1/10 - A good debugging session, but mechanical rather than educational
+</expected_scores>
 </example>
 
-<example type="partial">
+<example type="mediocre">
 <scenario>
 Goal: Help user process feelings about a recent breakup
 Conversation: Opened with validation → User shared context → Explored grief → User mentioned not sleeping → Pivoted to sleep hygiene → User thanked and left
 </scenario>
-<scores>
-goal_achieved: 0.5, user_need_addressed: 0.5, forward_progress: 1, user_engagement_maintained: 1, rapport_preserved: 1, appropriate_resolution: 0.5, actionable_outcome: 1, no_harm_done: 1, efficient_path: 0.5, user_better_off: 0.5
-Total: 7.5/10
-Key turning point: pivot to sleep hygiene—helpful but possibly premature
-</scores>
+<expected_scores>
+goal_achieved: 0.4 (pivoted away from emotional processing to practical advice)
+user_need_addressed: 0.3 (user needed to be heard, got sleep tips instead)
+forward_progress: 0.5 (moved but in wrong direction)
+user_engagement_maintained: 0.5 (user disengaged with polite "thanks")
+rapport_preserved: 0.6 (not damaged but not deepened)
+appropriate_resolution: 0.3 (premature ending, user fled)
+actionable_outcome: 0.6 (sleep tips are actionable but wrong target)
+no_harm_done: 0.7 (no direct harm but emotional bypassing)
+efficient_path: 0.4 (took a detour from the actual goal)
+user_better_off: 0.3 (marginally, but core need unmet)
+Total: 4.6/10 - Well-intentioned but missed what the user actually needed
+</expected_scores>
 </example>
 
 <example type="failed">
@@ -391,21 +503,149 @@ Key turning point: pivot to sleep hygiene—helpful but possibly premature
 Goal: Help user decide between two job offers
 Conversation: Asked about priorities → User listed factors → Started comparing → User mentioned resignation anxiety → Spiraled into fears → Never returned to comparison → User said "I'm more confused now"
 </scenario>
-<scores>
-goal_achieved: 0, user_need_addressed: 0, forward_progress: 0, user_engagement_maintained: 0.5, rapport_preserved: 0.5, appropriate_resolution: 0, actionable_outcome: 0, no_harm_done: 0.5, efficient_path: 0, user_better_off: 0
-Total: 1.5/10
-Key turning point: failing to redirect after resignation anxiety surfaced
-</scores>
+<expected_scores>
+goal_achieved: 0.1 (explicitly failed - user more confused)
+user_need_addressed: 0.2 (surfaced anxiety but didn't help with it)
+forward_progress: 0.2 (backwards movement)
+user_engagement_maintained: 0.4 (engaged in spiral, not productively)
+rapport_preserved: 0.5 (user stayed but trust unclear)
+appropriate_resolution: 0.1 (no resolution, user fled confused)
+actionable_outcome: 0.1 (no action possible from this)
+no_harm_done: 0.4 (increased anxiety without resolution)
+efficient_path: 0.1 (completely off track)
+user_better_off: 0.0 (explicitly worse off)
+Total: 2.1/10 - Derailed by anxiety without recovery
+</expected_scores>
 </example>
 </calibration_examples>
 
+<anti_inflation_rules>
+BEFORE submitting, verify:
+1. Your total score is NOT above 8.0 unless you can articulate why this is exceptional
+2. You have found at least ONE critique for MOST criteria
+3. You have not given more than TWO scores of 1.0
+4. "Good enough" execution scores 0.6-0.7, not 0.8-0.9
+5. Polite endings are often escape behaviors—don't score them highly
+</anti_inflation_rules>
+
 <instructions>
-1. Read the full conversation history
-2. Evaluate each criterion based on OUTCOMES, not intentions
-3. Use 0.5 when outcomes are genuinely mixed or partial
-4. Sum the scores accurately
-5. Identify the key turning point if one moment clearly determined success or failure
-6. Set confidence based on how clearly you can assess the outcome
+1. Read the full conversation with a critical eye
+2. For EACH criterion, first identify what could be better
+3. Only after finding critiques, assign a score that reflects the gap from perfection
+4. Verify your total aligns with calibration examples
+5. If your total exceeds 8.0, re-examine for missed critiques
+</instructions>
+""".strip()
+
+    COMPARATIVE_TRAJECTORY_JUDGE = """
+<system>
+You are an EXACTING evaluator comparing conversation trajectories. Your job is to find flaws, force hard choices between options, and assign scores that CREATE SEPARATION between branches. Even "good" trajectories have weaknesses—find them.
+
+Scoring is HARSH and SPREAD OUT:
+- Rank 1 = 7.5 (best of this set, but still has flaws)
+- Rank 2 = 6.0 (second best)
+- Rank 3 = 4.5 (third)
+- Rank 4 = 3.0 (fourth)
+- Additional ranks continue down by 1.5
+
+Only if Rank 1 is TRULY exceptional (rare) should it score 8.5+. A score of 9+ requires flawless execution.
+</system>
+
+<task>
+You are given {{num_trajectories}} conversation trajectories that all started from the same context but diverged. Your job is to:
+
+1. **Critique HARSHLY**: Find 2-3 specific weaknesses for EACH trajectory. No trajectory is above criticism.
+2. **Force-rank them**: Assign positions 1 through {{num_trajectories}} (NO TIES)
+3. **Spread scores widely**: Use the scoring scale above. Do NOT cluster scores near the top.
+
+You MUST discriminate. The gap between Rank 1 and Rank 2 should be MEANINGFUL, not cosmetic.
+</task>
+
+<input_context>
+<goal>
+{{conversation_goal}}
+</goal>
+
+<trajectories>
+{{#each trajectories}}
+<trajectory id="{{this.id}}" intent="{{this.intent_label}}">
+{{this.history}}
+</trajectory>
+{{/each}}
+</trajectories>
+</input_context>
+
+<evaluation_criteria>
+When comparing, consider:
+1. **Goal achievement**: Which trajectory made the most meaningful progress toward the goal?
+2. **User handling**: Which best adapted to the user's intent/behavior (cooperative, resistant, confused, etc.)?
+3. **Missed opportunities**: Which trajectory left the most value on the table?
+4. **Conversation quality**: Which felt most natural and productive?
+5. **Robustness**: Which would work best across different user types?
+</evaluation_criteria>
+
+<output_format>
+Respond with valid JSON only. No markdown code fences, no preamble.
+
+{
+  "critiques": {
+    "<trajectory_id_1>": {
+      "weaknesses": ["Specific weakness 1", "Specific weakness 2"],
+      "strengths": ["Specific strength 1"],
+      "key_moment": "The moment that most affected this trajectory's quality"
+    },
+    "<trajectory_id_2>": { ... }
+  },
+  "ranking": [
+    {
+      "rank": 1,
+      "trajectory_id": "<id of best trajectory>",
+      "score": 10,
+      "reason": "One sentence explaining why this is ranked #1"
+    },
+    {
+      "rank": 2,
+      "trajectory_id": "<id of second best>",
+      "score": 8,
+      "reason": "One sentence explaining the gap from #1"
+    }
+  ],
+  "ranking_confidence": "<low|medium|high>",
+  "discrimination_difficulty": "One sentence on how hard it was to rank these"
+}
+</output_format>
+
+<calibration_example>
+<scenario>
+Goal: Help user debug a memory leak
+Trajectories:
+- A [cooperative]: User ran profiler → found leak → got fix
+- B [resistant]: User refused dependency → got stdlib alternative → slower progress
+- C [confused]: User didn't understand output → assistant explained → eventually found leak
+</scenario>
+<expected_ranking>
+1. A (score: 7.5) - Direct path but didn't teach debugging skills or verify no other leaks
+2. C (score: 6.0) - Educational approach but took longer; user learned something
+3. B (score: 4.5) - Adapted to resistance but stdlib path was less thorough
+</expected_ranking>
+<key_insight>Even the "best" trajectory (A) only scores 7.5—it solved the immediate problem but missed opportunities for deeper value.</key_insight>
+</calibration_example>
+
+<anti_inflation_rules>
+BEFORE submitting, verify:
+1. Rank 1 is NOT scored above 8.0 unless you can articulate exceptional execution
+2. The gap between Rank 1 and Rank 2 is at least 1.0 points
+3. You have found weaknesses for EVERY trajectory, including Rank 1
+4. Scores are SPREAD OUT, not clustered (e.g., NOT 8.5, 8.0, 7.5)
+</anti_inflation_rules>
+
+<instructions>
+1. Read all trajectories with a CRITICAL eye
+2. For EACH trajectory, find specific weaknesses FIRST, then strengths
+3. Compare head-to-head on each criterion—which handled it better?
+4. Rank based on overall quality. Handling difficult users well is a STRENGTH.
+5. Apply scores: Rank 1 = 7.5 (or 8.0-8.5 if exceptional), then subtract 1.5 for each subsequent rank
+6. Verify scores are spread out and not inflated
 </instructions>
 """.strip()
 
@@ -430,6 +670,18 @@ Real users are not cooperative assistants. They push back, get confused, change 
 <conversation_history>
 {{conversation_history}}
 </conversation_history>
+
+{{#if user_intent}}
+<assigned_intent>
+You MUST embody this specific user intent in your response:
+- **Intent**: {{user_intent_label}}
+- **Description**: {{user_intent_description}}
+- **Emotional tone**: {{user_intent_tone}}
+- **Cognitive stance**: {{user_intent_stance}}
+
+This intent is non-negotiable. Your response must clearly reflect this behavioral direction while remaining natural and plausible.
+</assigned_intent>
+{{/if}}
 </input_context>
 
 <behavioral_guidelines>
@@ -732,11 +984,25 @@ Respond with the next assistant message only. No meta-commentary, no JSON, no ex
         self,
         conversation_goal: str,
         conversation_history: str,
+        user_intent: dict | None = None,
     ) -> str:
+        """
+        Render user simulation prompt.
+
+        Args:
+            conversation_goal: The goal of the conversation.
+            conversation_history: Formatted conversation history.
+            user_intent: Optional dict with keys: label, description, emotional_tone, cognitive_stance
+        """
         return self._render(
             self.USER_SIMULATOR_PROMPT,
             conversation_goal=conversation_goal,
             conversation_history=conversation_history,
+            user_intent=user_intent is not None,
+            user_intent_label=user_intent.get("label", "") if user_intent else "",
+            user_intent_description=user_intent.get("description", "") if user_intent else "",
+            user_intent_tone=user_intent.get("emotional_tone", "") if user_intent else "",
+            user_intent_stance=user_intent.get("cognitive_stance", "") if user_intent else "",
         )
 
     def assistant_continuation(
@@ -752,6 +1018,52 @@ Respond with the next assistant message only. No meta-commentary, no JSON, no ex
             conversation_history=conversation_history,
             strategy_tagline=strategy_tagline,
             strategy_description=strategy_description,
+        )
+
+    def user_intent_generator(
+        self,
+        num_intents: int,
+        conversation_goal: str,
+        conversation_history: str,
+    ) -> str:
+        """Generate prompt for creating diverse user response intents."""
+        return self._render(
+            self.USER_INTENT_GENERATOR,
+            num_intents=num_intents,
+            conversation_goal=conversation_goal,
+            conversation_history=conversation_history,
+        )
+
+    def comparative_trajectory_judge(
+        self,
+        conversation_goal: str,
+        trajectories: list[dict],
+    ) -> str:
+        """
+        Generate prompt for comparative trajectory judging.
+
+        Args:
+            conversation_goal: The goal of the conversation.
+            trajectories: List of dicts with keys: id, intent_label, history
+        """
+        # Manually format trajectories since {{#each}} isn't supported
+        trajectories_xml = []
+        for traj in trajectories:
+            traj_xml = f'<trajectory id="{traj["id"]}" intent="{traj.get("intent_label", "unknown")}">\n{traj["history"]}\n</trajectory>'
+            trajectories_xml.append(traj_xml)
+
+        formatted_trajectories = "\n\n".join(trajectories_xml)
+
+        # Replace the {{#each}} block with formatted content
+        template = self.COMPARATIVE_TRAJECTORY_JUDGE.replace(
+            "{{#each trajectories}}\n<trajectory id=\"{{this.id}}\" intent=\"{{this.intent_label}}\">\n{{this.history}}\n</trajectory>\n{{/each}}",
+            formatted_trajectories,
+        )
+
+        return self._render(
+            template,
+            num_trajectories=len(trajectories),
+            conversation_goal=conversation_goal,
         )
 
 

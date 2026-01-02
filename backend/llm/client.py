@@ -134,7 +134,13 @@ class LLM:
 
         for attempt in range(attempts):
             try:
-                response = await self._client.chat.completions.create(**request_params)
+                response = await self._client.chat.completions.create(
+                    **request_params,
+                    extra_body={
+                        "reasoning": {"enabled": False},
+                        "provider": {"order": ["fireworks"], "allow_fallbacks": True},
+                    },
+                )
             except OpenAIAuthError as e:
                 raise AuthenticationError(str(e)) from e
             except OpenAIRateLimitError as e:

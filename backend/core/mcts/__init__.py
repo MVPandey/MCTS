@@ -14,8 +14,10 @@ from backend.core.mcts.types import (
     CriterionScore,
     MCTSNode,
     MCTSRunResult,
+    ModelPricing,
     NodeStats,
     NodeStatus,
+    TokenTracker,
     TrajectoryEvaluation,
     TreeGeneratorOutput,
 )
@@ -33,8 +35,10 @@ __all__ = [
     "CriterionScore",
     "MCTSNode",
     "MCTSRunResult",
+    "ModelPricing",
     "NodeStats",
     "NodeStatus",
+    "TokenTracker",
     "TrajectoryEvaluation",
     "TreeGeneratorOutput",
     # Aggregation

@@ -1,4 +1,5 @@
 import asyncio
+import time
 from backend.core.mcts import MCTSAgent
 from backend.llm.client import LLM
 from backend.utils.config import config
@@ -13,11 +14,11 @@ llm = LLM(
 async def test_mcts():
     mcts_agent = MCTSAgent(
         llm=llm,
-        goal="Figure out a first approach to use JePA for natural language processing",
-        first_message="I'm trying to understand how world models like JePA can be applied to natural language processing. I'm not sure how to start. What does a dataset look like? How does it compare to the efficiency of transformers?",
-        init_branch=6,
+        goal="Identify a project idea that uses LLMs + multi-agent systems to create a fun and engaging game that cannot be done without agentic/LLMs. Avoid aggressive monetization (it'll be subscription based)",
+        first_message="I want to design a monetizable game for the app-store that uses LLMs. Any ideas?",
         deep_research=False,
         turns_per_branch=5,
+        user_intents_per_branch=4,
     )
 
     result = await mcts_agent.run(rounds=2)
@@ -25,4 +26,7 @@ async def test_mcts():
 
 
 if __name__ == "__main__":
+    start_time = time.time()
     asyncio.run(test_mcts())
+    end_time = time.time()
+    print(f"Time taken: {end_time - start_time:.2f} seconds")
