@@ -7,6 +7,7 @@ import logging
 from backend.core.dts.config import DTSConfig
 from backend.core.dts.components.evaluator import TrajectoryEvaluator
 from backend.core.dts.components.generator import StrategyGenerator
+from backend.core.dts.components.researcher import DeepResearcher
 from backend.core.dts.components.simulator import ConversationSimulator
 from backend.core.dts.tree import DialogueTree, generate_node_id
 from backend.core.dts.types import (
@@ -100,6 +101,11 @@ class DTSEngine:
             prune_threshold=config.prune_threshold,
             max_concurrency=config.max_concurrency,
             on_usage=self._track_usage,
+        )
+
+        self._researcher = DeepResearcher(
+            cache_dir=config.research_cache_dir,
+            on_cost=self._track_research_cost,
         )
 
         self._tree: DialogueTree | None = None
@@ -244,7 +250,7 @@ class DTSEngine:
 
         # Generate strategies
         _log("INIT", "Generating strategies...", indent=1)
-        deep_context = self._get_deep_research_context()
+        deep_context = await self._get_deep_research_context()
         strategies = await self._generator.generate_strategies(
             cfg.first_message,
             cfg.init_branches,
@@ -327,11 +333,19 @@ class DTSEngine:
             passed=False,
         )
 
-    def _get_deep_research_context(self) -> str | None:
-        """Get deep research context (stub)."""
+    async def _get_deep_research_context(self) -> str | None:
+        """Get deep research context using DeepResearcher."""
         if not self.config.deep_research:
             return None
-        return "Relevant domain research context available."
+
+        return await self._researcher.research(
+            goal=self.config.goal,
+            first_message=self.config.first_message,
+        )
+
+    def _track_research_cost(self, cost_usd: float) -> None:
+        """Track external research costs (from GPT Researcher)."""
+        self._token_tracker.research_cost_usd += cost_usd
 
     def _track_usage(self, completion: Completion, phase: str) -> None:
         """Track token usage by phase."""

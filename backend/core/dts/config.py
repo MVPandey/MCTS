@@ -34,6 +34,7 @@ class DTSConfig:
     first_message: str
     init_branches: int = 6
     deep_research: bool = False
+    research_cache_dir: str = ".cache/research"
     turns_per_branch: int = 5
     user_intents_per_branch: int = 3
     scoring_mode: ScoringMode = "comparative"

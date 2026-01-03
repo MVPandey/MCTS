@@ -13,7 +13,33 @@ class Config(BaseSettings):
         ...,
         description="API key for LLM service",
     )
+
+    openrouter_api_key: str = Field(
+        default=openai_api_key,
+        description="API key for OpenRouter API",
+    )
+
     llm_name: str = Field(default="minimax/minimax-m2.1", description="LLM model name")
+
+    # --- These are for deep researcher ---
+    fast_llm: str = Field(
+        default="openrouter:bytedance-seed/seed-1.6-flash",
+        description="Fast LLM model name",
+    )
+    smart_llm: str = Field(
+        default="openrouter:google/gemini-2.0-flash-001",
+        description="Smart LLM model name",
+    )
+    strategic_llm: str = Field(
+        default="openrouter:minimax/minimax-m2.1",
+        description="Strategic LLM model name",
+    )
+
+    tavily_api_key: str = Field(
+        default="",
+        description="API key for Tavily API",
+    )
+
     embedding_base_url: str = Field(
         default="https://openrouter.ai/api/v1", description="Base URL for embedding API"
     )

@@ -16,9 +16,9 @@ async def test_dts():
     engine = DTSEngine(
         llm=llm,
         config=DTSConfig(
-            goal="Identify a project idea that uses LLMs + multi-agent systems to create a fun and engaging game that cannot be done without agentic/LLMs. Avoid aggressive monetization (it'll be subscription based)",
-            first_message="I want to design a monetizable game for the app-store that uses LLMs. Any ideas?",
-            deep_research=False,
+            goal="Identify the most promising direction for a research paper",
+            first_message="I want to improve the Muon optimizer to increase training speed/performance, etc, specifically for the world record nano-gpt run",
+            deep_research=True,
             turns_per_branch=2,
             user_intents_per_branch=2,
         ),

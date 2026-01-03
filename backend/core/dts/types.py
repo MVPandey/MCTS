@@ -82,6 +82,10 @@ class TokenTracker:
     user_simulation: TokenStats = field(default_factory=TokenStats)
     assistant_generation: TokenStats = field(default_factory=TokenStats)
     judging: TokenStats = field(default_factory=TokenStats)
+    research: TokenStats = field(default_factory=TokenStats)
+
+    # External costs (e.g., GPT Researcher uses its own LLM client)
+    research_cost_usd: float = 0.0
 
     def get_pricing(self) -> ModelPricing:
         """Get pricing for the current model."""
@@ -99,6 +103,7 @@ class TokenTracker:
             + self.user_simulation.input_tokens
             + self.assistant_generation.input_tokens
             + self.judging.input_tokens
+            + self.research.input_tokens
         )
 
     @property
@@ -110,6 +115,7 @@ class TokenTracker:
             + self.user_simulation.output_tokens
             + self.assistant_generation.output_tokens
             + self.judging.output_tokens
+            + self.research.output_tokens
         )
 
     @property
@@ -126,13 +132,17 @@ class TokenTracker:
             + self.user_simulation.request_count
             + self.assistant_generation.request_count
             + self.judging.request_count
+            + self.research.request_count
         )
 
     @property
     def total_cost(self) -> float:
-        """Total cost in dollars."""
+        """Total cost in dollars (including external research costs)."""
         pricing = self.get_pricing()
-        return pricing.calculate_cost(self.total_input_tokens, self.total_output_tokens)
+        token_cost = pricing.calculate_cost(
+            self.total_input_tokens, self.total_output_tokens
+        )
+        return token_cost + self.research_cost_usd
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -175,6 +185,12 @@ class TokenTracker:
                     "input_tokens": self.judging.input_tokens,
                     "output_tokens": self.judging.output_tokens,
                     "requests": self.judging.request_count,
+                },
+                "research": {
+                    "input_tokens": self.research.input_tokens,
+                    "output_tokens": self.research.output_tokens,
+                    "requests": self.research.request_count,
+                    "external_cost_usd": round(self.research_cost_usd, 6),
                 },
             },
         }
@@ -221,6 +237,7 @@ class TokenTracker:
             ("User Simulation", self.user_simulation),
             ("Assistant Generation", self.assistant_generation),
             ("Judging", self.judging),
+            ("Research", self.research),
         ]
         for name, stats in phases:
             if stats.request_count > 0:
@@ -232,6 +249,14 @@ class TokenTracker:
                     f"{stats.input_tokens:>8,} in | {stats.output_tokens:>8,} out | "
                     f"${phase_cost:.4f}"
                 )
+
+        # External research cost (GPT Researcher uses its own LLM)
+        if self.research_cost_usd > 0:
+            print(
+                f"  {'Research (external)':<22} | {'N/A':>4} reqs | "
+                f"{'N/A':>8} in | {'N/A':>8} out | "
+                f"${self.research_cost_usd:.4f}"
+            )
         print("=" * 60)
 
 
