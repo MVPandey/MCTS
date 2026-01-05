@@ -1,5 +1,8 @@
 """Trajectory evaluation component for DTS."""
 
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
 import asyncio
@@ -8,21 +11,22 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from backend.core.dts.aggregator import aggregate_majority_vote
 from backend.core.dts.types import AggregatedScore, DialogueNode
+from backend.core.dts.utils import format_message_history, log_phase
 from backend.core.prompts import prompts
 from backend.llm.types import Message
 
 if TYPE_CHECKING:
     from backend.llm.client import LLM
 
+# -----------------------------------------------------------------------------
+# Module Setup
+# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
 
-def _log(phase: str, message: str, indent: int = 0) -> None:
-    """Print a formatted log message."""
-    prefix = "  " * indent
-    print(f"[DTS:{phase}] {prefix}{message}")
-
-
+# -----------------------------------------------------------------------------
+# Class: TrajectoryEvaluator
+# -----------------------------------------------------------------------------
 class TrajectoryEvaluator:
     """
     Evaluates conversation trajectories using LLM judges.
@@ -41,6 +45,7 @@ class TrajectoryEvaluator:
         prune_threshold: float = 6.5,
         max_concurrency: int = 16,
         on_usage: Callable[[Any, str], None] | None = None,
+        deep_research_context: str | None = None,
     ) -> None:
         """
         Initialize the evaluator.
@@ -53,6 +58,7 @@ class TrajectoryEvaluator:
             prune_threshold: Score threshold for pass/fail determination.
             max_concurrency: Maximum concurrent LLM calls.
             on_usage: Callback for token usage tracking (completion, phase).
+            deep_research_context: Optional research context to inform judging.
         """
         self.llm = llm
         self.goal = goal
@@ -61,6 +67,11 @@ class TrajectoryEvaluator:
         self.prune_threshold = prune_threshold
         self._sem = asyncio.Semaphore(max_concurrency)
         self._on_usage = on_usage
+        self.deep_research_context = deep_research_context
+
+    def set_research_context(self, context: str | None) -> None:
+        """Set or update the deep research context for judging."""
+        self.deep_research_context = context
 
     async def evaluate_absolute(
         self,
@@ -80,11 +91,14 @@ class TrajectoryEvaluator:
         for node, result in zip(nodes, results):
             if isinstance(result, Exception):
                 logger.error(f"Error judging node {node.id}: {result}")
-                scores_by_id[node.id] = self._error_score()
+                scores_by_id[node.id] = AggregatedScore.zero(self.prune_threshold)
             else:
-                scores_by_id[node.id] = result
-                node.stats.judge_scores = result.individual_scores
-                node.stats.aggregated_score = result.aggregated_score
+                agg, critiques = result
+                scores_by_id[node.id] = agg
+                node.stats.judge_scores = agg.individual_scores
+                node.stats.aggregated_score = agg.aggregated_score
+                if critiques:
+                    node.stats.critiques = critiques
 
         return scores_by_id
 
@@ -126,7 +140,8 @@ class TrajectoryEvaluator:
         for parent_id, group in multi_groups:
             tasks.append(self._judge_group_comparative(parent_id, group))
 
-        _log(
+        log_phase(
+            logger,
             "JUDGE",
             f"Judging {len(single_nodes)} single + {len(multi_groups)} groups in parallel...",
             indent=1,
@@ -144,13 +159,16 @@ class TrajectoryEvaluator:
 
         return scores_by_id
 
-    async def _judge_single(self, node: DialogueNode) -> AggregatedScore:
-        """Run 3 parallel judges on a single trajectory."""
-        history_str = self._format_history(node.messages)
+    async def _judge_single(
+        self, node: DialogueNode
+    ) -> tuple[AggregatedScore, dict | None]:
+        """Run 3 parallel judges on a single trajectory. Returns (score, critiques)."""
+        history_str = format_message_history(node.messages)
 
         prompt = prompts.trajectory_outcome_judge(
             conversation_goal=self.goal,
             conversation_history=history_str,
+            deep_research_context=self.deep_research_context,
         )
 
         # Run 3 judges in parallel
@@ -158,34 +176,73 @@ class TrajectoryEvaluator:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         scores: list[float] = []
+        judge_results: list[dict] = []
+
         for result in results:
             if isinstance(result, Exception):
                 logger.warning(f"Judge failed: {result}")
                 scores.append(0.0)
+                judge_results.append({})
             elif result and "total_score" in result:
                 scores.append(float(result["total_score"]))
+                judge_results.append(result)
             else:
                 scores.append(0.0)
+                judge_results.append({})
 
         while len(scores) < 3:
             scores.append(0.0)
+            judge_results.append({})
 
-        return aggregate_majority_vote(scores[:3], pass_threshold=self.prune_threshold)
+        agg = aggregate_majority_vote(scores[:3], pass_threshold=self.prune_threshold)
+
+        # Extract critique from median judge (the one closest to aggregated score)
+        critiques = None
+        median_score = agg.aggregated_score
+        closest_idx = min(range(3), key=lambda i: abs(scores[i] - median_score))
+        median_result = judge_results[closest_idx]
+
+        if median_result:
+            # Normalize absolute judge output to match comparative format
+            critiques = {
+                "strengths": [],
+                "weaknesses": [],
+                "key_moment": median_result.get("key_turning_point"),
+                "summary": median_result.get("summary"),
+                "biggest_missed_opportunity": median_result.get(
+                    "biggest_missed_opportunity"
+                ),
+            }
+            # Extract weaknesses from low-scoring criteria
+            criteria = median_result.get("criteria", {})
+            for name, data in criteria.items():
+                if isinstance(data, dict):
+                    score = data.get("score", 1.0)
+                    rationale = data.get("rationale", "")
+                    if score < 0.5 and rationale:
+                        critiques["weaknesses"].append(f"{name}: {rationale}")
+                    elif score >= 0.8 and rationale:
+                        critiques["strengths"].append(f"{name}: {rationale}")
+
+        return agg, critiques
 
     async def _judge_single_wrapped(
         self, node: DialogueNode
     ) -> dict[str, AggregatedScore]:
         """Wrapper to return dict format for gather."""
-        result = await self._judge_single(node)
-        node.stats.judge_scores = result.individual_scores
-        node.stats.aggregated_score = result.aggregated_score
-        return {node.id: result}
+        agg, critiques = await self._judge_single(node)
+        node.stats.judge_scores = agg.individual_scores
+        node.stats.aggregated_score = agg.aggregated_score
+        if critiques:
+            node.stats.critiques = critiques
+        return {node.id: agg}
 
     async def _judge_group_comparative(
         self, parent_id: str, group: list[DialogueNode]
     ) -> dict[str, AggregatedScore]:
         """Judge a group of siblings using comparative ranking."""
-        _log(
+        log_phase(
+            logger,
             "JUDGE",
             f"Ranking {len(group)} siblings (parent: {parent_id[:8]}...)",
             indent=1,
@@ -199,13 +256,14 @@ class TrajectoryEvaluator:
                     "intent_label": node.user_intent.label
                     if node.user_intent
                     else "unknown",
-                    "history": self._format_history(node.messages),
+                    "history": format_message_history(node.messages),
                 }
             )
 
         prompt = prompts.comparative_trajectory_judge(
             conversation_goal=self.goal,
             trajectories=trajectories,
+            deep_research_context=self.deep_research_context,
         )
 
         result = await self._call_llm_json(prompt)
@@ -220,11 +278,6 @@ class TrajectoryEvaluator:
         ranking = result.get("ranking", [])
         critiques = result.get("critiques", {})
 
-        for node_id, critique in critiques.items():
-            weaknesses = critique.get("weaknesses", [])
-            if weaknesses:
-                _log("JUDGE", f"Critiques for {node_id[:8]}: {weaknesses}", indent=2)
-
         for entry in ranking:
             node_id = entry.get("trajectory_id", "")
             rank = entry.get("rank", 999)
@@ -237,11 +290,27 @@ class TrajectoryEvaluator:
 
             intent_label = node.user_intent.label if node.user_intent else "?"
             strategy = node.strategy.tagline if node.strategy else "unknown"
-            _log(
+            log_phase(
+                logger,
                 "JUDGE",
-                f"Rank {rank}: '{strategy}' [{intent_label}] = {score}/10 - {reason}",
+                f"Rank {rank}: '{strategy}' [{intent_label}] = {score}/10",
                 indent=2,
             )
+            log_phase(logger, "JUDGE", f"  Reason: {reason}", indent=2)
+
+            # Log critiques (strengths, weaknesses, key_moment)
+            if node_id in critiques:
+                critique = critiques[node_id]
+                strengths = critique.get("strengths", [])
+                weaknesses = critique.get("weaknesses", [])
+                key_moment = critique.get("key_moment", "")
+
+                if strengths:
+                    log_phase(logger, "JUDGE", f"  Strengths: {strengths}", indent=2)
+                if weaknesses:
+                    log_phase(logger, "JUDGE", f"  Weaknesses: {weaknesses}", indent=2)
+                if key_moment:
+                    log_phase(logger, "JUDGE", f"  Key moment: {key_moment}", indent=2)
 
             agg = AggregatedScore(
                 individual_scores=[score, score, score],
@@ -254,10 +323,14 @@ class TrajectoryEvaluator:
             node.stats.judge_scores = [score]
             node.stats.aggregated_score = score
 
+            # Store critiques if available
+            if node_id in critiques:
+                node.stats.critiques = critiques[node_id]
+
         # Handle missing nodes
         for node in group:
             if node.id not in scores_by_id:
-                scores_by_id[node.id] = self._error_score()
+                scores_by_id[node.id] = AggregatedScore.zero(self.prune_threshold)
                 node.stats.judge_scores = [0.0]
                 node.stats.aggregated_score = 0.0
 
@@ -273,45 +346,45 @@ class TrajectoryEvaluator:
         scores_by_id: dict[str, AggregatedScore] = {}
         for node, result in zip(group, results):
             if isinstance(result, Exception):
-                result = self._error_score()
-            scores_by_id[node.id] = result
-            node.stats.judge_scores = result.individual_scores
-            node.stats.aggregated_score = result.aggregated_score
+                agg = AggregatedScore.zero(self.prune_threshold)
+                critiques = None
+            else:
+                agg, critiques = result
+            scores_by_id[node.id] = agg
+            node.stats.judge_scores = agg.individual_scores
+            node.stats.aggregated_score = agg.aggregated_score
+            if critiques:
+                node.stats.critiques = critiques
 
         return scores_by_id
 
-    def _error_score(self) -> AggregatedScore:
-        """Return a zero score for error cases."""
-        return AggregatedScore(
-            individual_scores=[0.0, 0.0, 0.0],
-            aggregated_score=0.0,
-            pass_threshold=self.prune_threshold,
-            pass_votes=0,
-            passed=False,
-        )
-
-    def _format_history(self, messages: list[Message]) -> str:
-        """Format messages for prompts."""
-        lines = []
-        for msg in messages:
-            role = msg.role.capitalize()
-            content = msg.content or ""
-            lines.append(f"{role}: {content}")
-        return "\n\n".join(lines)
-
-    async def _call_llm_json(self, prompt: str) -> dict[str, Any] | None:
-        """Make an LLM call expecting JSON output."""
+    async def _call_llm_json(
+        self, prompt: str, max_retries: int = 3
+    ) -> dict[str, Any] | None:
+        """Make an LLM call expecting JSON output with retry logic."""
         async with self._sem:
-            try:
-                completion = await self.llm.complete(
-                    [Message.user(prompt)],
-                    model=self.model,
-                    temperature=self.judge_temperature,
-                    structured_output=True,
-                )
-                if self._on_usage:
-                    self._on_usage(completion, "judge")
-                return completion.data
-            except Exception as e:
-                logger.error(f"JSON LLM call failed: {e}")
-                return None
+            for attempt in range(max_retries):
+                try:
+                    completion = await self.llm.complete(
+                        [Message.user(prompt)],
+                        model=self.model,
+                        temperature=self.judge_temperature,
+                        structured_output=True,
+                    )
+                    if self._on_usage:
+                        self._on_usage(completion, "judge")
+                    if completion.data:
+                        return completion.data
+                    # Empty data, retry
+                    logger.warning(
+                        f"Empty JSON response (attempt {attempt + 1}/{max_retries})"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"JSON LLM call failed (attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+                    if attempt == max_retries - 1:
+                        logger.error(
+                            f"JSON LLM call failed after {max_retries} retries"
+                        )
+            return None

@@ -1,13 +1,24 @@
 """Conversation simulation component for DTS."""
 
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
 import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Callable
 
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
 from backend.core.dts.types import DialogueNode, NodeStatus, Strategy, UserIntent
 from backend.core.dts.tree import generate_node_id
+from backend.core.dts.utils import emit_event, log_phase
 from backend.core.prompts import prompts
 from backend.llm.types import Completion, Message
 
@@ -15,16 +26,24 @@ if TYPE_CHECKING:
     from backend.llm.client import LLM
     from backend.core.dts.tree import DialogueTree
 
+# -----------------------------------------------------------------------------
+# Module Setup
+# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
 
-def _log(phase: str, message: str, indent: int = 0) -> None:
-    """Print a formatted log message."""
-    prefix = "  " * indent
-    print(f"[DTS:{phase}] {prefix}{message}")
+# -----------------------------------------------------------------------------
+# Exceptions
+# -----------------------------------------------------------------------------
+class LLMEmptyResponseError(Exception):
+    """Raised when LLM returns empty/null content after retries exhausted."""
+
+    pass
 
 
-# Signals indicating conversation should terminate early
+# -----------------------------------------------------------------------------
+# Constants
+# -----------------------------------------------------------------------------
 TERMINATION_SIGNALS = [
     "goodbye",
     "bye",
@@ -46,6 +65,9 @@ TERMINATION_SIGNALS = [
 ]
 
 
+# -----------------------------------------------------------------------------
+# Class: ConversationSimulator
+# -----------------------------------------------------------------------------
 class ConversationSimulator:
     """
     Simulates multi-turn conversations for branch expansion.
@@ -57,6 +79,8 @@ class ConversationSimulator:
     - Parallel branch expansion with user intent forking
     """
 
+    # --- Initialization ---
+
     def __init__(
         self,
         llm: LLM,
@@ -65,6 +89,7 @@ class ConversationSimulator:
         temperature: float = 0.7,
         max_concurrency: int = 16,
         on_usage: Callable[[Any, str], None] | None = None,
+        on_event: Callable[[str, dict[str, Any]], Any] | None = None,
     ) -> None:
         """
         Initialize the simulator.
@@ -76,6 +101,7 @@ class ConversationSimulator:
             temperature: Temperature for generation.
             max_concurrency: Maximum concurrent LLM calls.
             on_usage: Callback for token usage tracking (completion, phase).
+            on_event: Async callback for emitting events to UI.
         """
         self.llm = llm
         self.goal = goal
@@ -83,6 +109,9 @@ class ConversationSimulator:
         self.temperature = temperature
         self._sem = asyncio.Semaphore(max_concurrency)
         self._on_usage = on_usage
+        self._on_event = on_event
+
+    # --- Public Methods ---
 
     async def expand_nodes(
         self,
@@ -110,7 +139,8 @@ class ConversationSimulator:
             return await self._expand_linear_batch(nodes, turns)
 
         # With forking: scatter-gather pattern
-        _log(
+        log_phase(
+            logger,
             "FORK",
             f"Generating {intents_per_node} intents for {len(nodes)} nodes...",
             indent=1,
@@ -136,10 +166,29 @@ class ConversationSimulator:
 
             intents = intents_result
             strategy_name = node.strategy.tagline if node.strategy else "root"
-            _log("FORK", f"'{strategy_name}': {len(intents)} intents", indent=2)
+            log_phase(
+                logger, "FORK", f"'{strategy_name}': {len(intents)} intents", indent=2
+            )
 
-            for intent in intents:
-                _log("FORK", f"  [{intent.emotional_tone}] {intent.label}", indent=2)
+            for idx, intent in enumerate(intents):
+                log_phase(
+                    logger,
+                    "FORK",
+                    f"  [{intent.emotional_tone}] {intent.label}",
+                    indent=2,
+                )
+                # Emit intent_generated event for UI
+                await self._emit(
+                    "intent_generated",
+                    {
+                        "strategy": strategy_name,
+                        "index": idx + 1,
+                        "total": len(intents),
+                        "label": intent.label,
+                        "emotional_tone": intent.emotional_tone,
+                        "cognitive_stance": intent.cognitive_stance,
+                    },
+                )
 
                 # Create forked child
                 child = DialogueNode(
@@ -161,7 +210,9 @@ class ConversationSimulator:
             expansion_tasks.append(self._expand_linear(node, turns))
 
         # Execute all expansions with as_completed
-        _log("FORK", f"Expanding {len(expansion_tasks)} branches...", indent=1)
+        log_phase(
+            logger, "FORK", f"Expanding {len(expansion_tasks)} branches...", indent=1
+        )
 
         expanded = []
         completed = 0
@@ -183,8 +234,12 @@ class ConversationSimulator:
                 logger.error(f"Expansion error: {e}")
                 failed += 1
 
-        _log("FORK", f"Completed: {completed} | Failed: {failed}", indent=1)
+        log_phase(
+            logger, "FORK", f"Completed: {completed} | Failed: {failed}", indent=1
+        )
         return expanded
+
+    # --- Private Methods ---
 
     async def _expand_linear_batch(
         self, nodes: list[DialogueNode], turns: int
@@ -203,87 +258,158 @@ class ConversationSimulator:
 
         return expanded
 
+    async def _run_turn(
+        self,
+        node: DialogueNode,
+        history: list[Message],
+        turn_idx: int,
+        skip_user_simulation: bool = False,
+        label: str | None = None,
+    ) -> bool:
+        """
+        Run a single conversation turn (user + assistant exchange).
+
+        Args:
+            node: The dialogue node being expanded.
+            history: Message history (modified in place).
+            turn_idx: Zero-based turn index.
+            skip_user_simulation: If True, skip user simulation (for rephrased first turn).
+            label: Optional label for logging (e.g., intent label).
+
+        Returns:
+            True if turn completed successfully, False if expansion should stop.
+        """
+        turn_num = turn_idx + 1
+        label_suffix = f"[{label}]" if label else ""
+
+        if not skip_user_simulation:
+            try:
+                user_response = await self._simulate_user(history)
+            except LLMEmptyResponseError:
+                log_phase(
+                    logger,
+                    "EXPAND",
+                    f"[Turn {turn_num}] FAILED: empty user response",
+                    indent=2,
+                )
+                node.status = NodeStatus.ERROR
+                node.prune_reason = "empty user response after retries"
+                return False
+
+            history.append(Message.user(user_response))
+            log_phase(
+                logger,
+                "EXPAND",
+                f"[Turn {turn_num}]{label_suffix} User: {user_response[:100]}...",
+                indent=2,
+            )
+
+            if self._should_terminate(user_response):
+                log_phase(logger, "EXPAND", f"[Turn {turn_num}] EARLY EXIT", indent=2)
+                node.status = NodeStatus.TERMINAL
+                return False
+
+        try:
+            assistant_response = await self._generate_assistant(history, node.strategy)
+        except LLMEmptyResponseError:
+            log_phase(
+                logger,
+                "EXPAND",
+                f"[Turn {turn_num}] FAILED: empty assistant response",
+                indent=2,
+            )
+            node.status = NodeStatus.ERROR
+            node.prune_reason = "empty assistant response after retries"
+            return False
+
+        history.append(Message.assistant(assistant_response))
+        log_phase(
+            logger,
+            "EXPAND",
+            f"[Turn {turn_num}]{label_suffix} Assistant: {assistant_response[:100]}...",
+            indent=2,
+        )
+        return True
+
     async def _expand_linear(self, node: DialogueNode, turns: int) -> DialogueNode:
         """Expand a single node linearly (no intent forking)."""
         history = list(node.messages)
-
         for turn_idx in range(turns):
-            # Simulate user
-            user_response = await self._simulate_user(history)
-            history.append(Message.user(user_response))
-            _log(
-                "EXPAND",
-                f"[Turn {turn_idx + 1}] User: {user_response[:100]}...",
-                indent=2,
-            )
-
-            # Check early termination
-            if self._should_terminate(user_response):
-                _log("EXPAND", f"[Turn {turn_idx + 1}] EARLY EXIT", indent=2)
-                node.status = NodeStatus.TERMINAL
+            if not await self._run_turn(node, history, turn_idx):
                 break
-
-            # Generate assistant
-            assistant_response = await self._generate_assistant(history, node.strategy)
-            history.append(Message.assistant(assistant_response))
-            _log(
-                "EXPAND",
-                f"[Turn {turn_idx + 1}] Assistant: {assistant_response[:100]}...",
-                indent=2,
-            )
-
         node.messages = history
         return node
 
     async def _expand_with_intent(
         self, node: DialogueNode, turns: int, first_intent: UserIntent
     ) -> DialogueNode:
-        """Expand with first user response following a specific intent."""
+        """
+        Expand with first user message modified by the intent.
+
+        Rephrases the initial user message to incorporate the intent's emotional
+        tone and cognitive stance, creating divergent branches from the start.
+        """
         history = list(node.messages)
 
+        # Rephrase the initial user message with the intent
+        if history and history[0].role == "user":
+            original_content = history[0].content or ""
+            try:
+                rephrased = await self._rephrase_initial_message(
+                    original_content, first_intent
+                )
+                history[0] = Message.user(rephrased)
+                log_phase(
+                    logger,
+                    "EXPAND",
+                    f"[{first_intent.label}] Rephrased: {rephrased[:100]}...",
+                    indent=2,
+                )
+            except LLMEmptyResponseError:
+                log_phase(
+                    logger,
+                    "EXPAND",
+                    f"[{first_intent.label}] Rephrase failed, using original",
+                    indent=2,
+                )
+
         for turn_idx in range(turns):
-            # Simulate user (with intent on first turn)
-            if turn_idx == 0:
-                user_response = await self._simulate_user(history, first_intent)
-                _log(
-                    "EXPAND",
-                    f"[Turn 1][{first_intent.label}] User: {user_response[:100]}...",
-                    indent=2,
-                )
-            else:
-                user_response = await self._simulate_user(history)
-                _log(
-                    "EXPAND",
-                    f"[Turn {turn_idx + 1}] User: {user_response[:100]}...",
-                    indent=2,
-                )
-
-            history.append(Message.user(user_response))
-
-            # Check early termination
-            if self._should_terminate(user_response):
-                _log("EXPAND", f"[Turn {turn_idx + 1}] EARLY EXIT", indent=2)
-                node.status = NodeStatus.TERMINAL
+            # First turn skips user simulation (message already rephrased)
+            skip_user = turn_idx == 0
+            if not await self._run_turn(
+                node, history, turn_idx, skip_user, first_intent.label
+            ):
                 break
-
-            # Generate assistant
-            assistant_response = await self._generate_assistant(history, node.strategy)
-            history.append(Message.assistant(assistant_response))
-            _log(
-                "EXPAND",
-                f"[Turn {turn_idx + 1}] Assistant: {assistant_response[:100]}...",
-                indent=2,
-            )
 
         node.messages = history
         return node
+
+    async def _rephrase_initial_message(
+        self, original_message: str, intent: UserIntent
+    ) -> str:
+        """
+        Rephrase the initial user message to incorporate the intent.
+
+        This modifies the original message to reflect the intent's emotional
+        tone and cognitive stance while preserving the core request/goal.
+        """
+        system_prompt = prompts.rephrase_with_intent(
+            original_message=original_message,
+            intent_label=intent.label,
+            intent_description=intent.description,
+            emotional_tone=intent.emotional_tone,
+            cognitive_stance=intent.cognitive_stance,
+        )
+
+        messages = [Message.system(system_prompt), Message.user(original_message)]
+        return await self._call_llm_with_retry(messages, phase="rephrase")
 
     async def _simulate_user(
         self,
         history: list[Message],
         intent: UserIntent | None = None,
     ) -> str:
-        """Simulate a user response."""
+        """Simulate a user response with retry on empty responses."""
         intent_dict = None
         if intent:
             intent_dict = {
@@ -295,30 +421,61 @@ class ConversationSimulator:
 
         system_prompt = prompts.user_simulation(
             conversation_goal=self.goal,
-            conversation_history=self._format_history(history),
             user_intent=intent_dict,
         )
 
         messages = [Message.system(system_prompt)] + history
-        completion = await self._call_llm(messages, phase="user")
-        return completion.message.content or ""
+        return await self._call_llm_with_retry(messages, phase="user")
 
     async def _generate_assistant(
         self,
         history: list[Message],
         strategy: Strategy | None,
     ) -> str:
-        """Generate an assistant response."""
+        """Generate an assistant response with retry on empty responses."""
         system_prompt = prompts.assistant_continuation(
             conversation_goal=self.goal,
-            conversation_history=self._format_history(history),
             strategy_tagline=strategy.tagline if strategy else "",
             strategy_description=strategy.description if strategy else "",
         )
 
         messages = [Message.system(system_prompt)] + history
-        completion = await self._call_llm(messages, phase="assistant")
-        return completion.message.content or ""
+        return await self._call_llm_with_retry(messages, phase="assistant")
+
+    async def _call_llm_with_retry(
+        self,
+        messages: list[Message],
+        phase: str,
+        max_retries: int = 3,
+    ) -> str:
+        """
+        Call LLM with retry logic for empty responses.
+
+        Uses tenacity for exponential backoff. Raises LLMEmptyResponseError
+        if all retries are exhausted.
+        """
+
+        @retry(
+            retry=retry_if_exception_type(LLMEmptyResponseError),
+            stop=stop_after_attempt(max_retries),
+            wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
+            reraise=True,
+        )
+        async def _attempt() -> str:
+            completion = await self._call_llm(messages, phase=phase)
+            content = completion.message.content
+            if not content or not content.strip():
+                logger.warning(f"Empty LLM response for phase '{phase}', retrying...")
+                raise LLMEmptyResponseError(f"Empty response for phase '{phase}'")
+            return content
+
+        try:
+            return await _attempt()
+        except LLMEmptyResponseError:
+            logger.error(
+                f"Failed to get non-empty response for '{phase}' after {max_retries} retries"
+            )
+            raise
 
     def _should_terminate(self, user_response: str) -> bool:
         """Check if response signals conversation end."""
@@ -336,14 +493,9 @@ class ConversationSimulator:
 
         return False
 
-    def _format_history(self, messages: list[Message]) -> str:
-        """Format messages for prompts."""
-        lines = []
-        for msg in messages:
-            role = msg.role.capitalize()
-            content = msg.content or ""
-            lines.append(f"{role}: {content}")
-        return "\n\n".join(lines)
+    async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
+        """Emit an event if callback is set."""
+        await emit_event(self._on_event, event_type, data, logger)
 
     async def _call_llm(
         self, messages: list[Message], phase: str = "other"

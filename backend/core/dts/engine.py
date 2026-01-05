@@ -1,8 +1,12 @@
 """Dialogue Tree Search Engine - Main orchestrator."""
 
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
 import logging
+from typing import Callable, Awaitable
 
 from backend.core.dts.config import DTSConfig
 from backend.core.dts.components.evaluator import TrajectoryEvaluator
@@ -17,18 +21,24 @@ from backend.core.dts.types import (
     NodeStatus,
     TokenTracker,
 )
+from backend.core.dts.utils import emit_event, log_phase
 from backend.llm.client import LLM
 from backend.llm.types import Completion, Message
 
+# -----------------------------------------------------------------------------
+# Module Setup
+# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
+# -----------------------------------------------------------------------------
+# Type Aliases
+# -----------------------------------------------------------------------------
+EventCallback = Callable[[str, dict], Awaitable[None]]
 
-def _log(phase: str, message: str, indent: int = 0) -> None:
-    """Print a formatted log message."""
-    prefix = "  " * indent
-    print(f"[DTS:{phase}] {prefix}{message}")
 
-
+# -----------------------------------------------------------------------------
+# Class: DTSEngine
+# -----------------------------------------------------------------------------
 class DTSEngine:
     """
     Dialogue Tree Search Engine.
@@ -53,6 +63,8 @@ class DTSEngine:
         result = await engine.run(rounds=2)
     """
 
+    # --- Initialization ---
+
     def __init__(
         self,
         llm: LLM,
@@ -68,17 +80,20 @@ class DTSEngine:
         self.llm = llm
         self.config = config
 
-        # Auto-detect model from LLM client if not provided
-        model = config.model or getattr(llm, "_default_model", None)
+        # Resolve per-phase models with fallbacks
+        default_model = config.model or getattr(llm, "_default_model", None)
+        strategy_model = config.strategy_model or default_model
+        simulator_model = config.simulator_model or default_model
+        judge_model = config.judge_model or default_model
 
-        # Token tracking
-        self._token_tracker = TokenTracker(model_name=model or "unknown")
+        # Token tracking (use default model name for summary)
+        self._token_tracker = TokenTracker(model_name=default_model or "unknown")
 
-        # Create components with shared token tracking
+        # Create components with per-phase models
         self._generator = StrategyGenerator(
             llm=llm,
             goal=config.goal,
-            model=model,
+            model=strategy_model,
             temperature=config.temperature,
             max_concurrency=config.max_concurrency,
             on_usage=self._track_usage,
@@ -87,16 +102,17 @@ class DTSEngine:
         self._simulator = ConversationSimulator(
             llm=llm,
             goal=config.goal,
-            model=model,
+            model=simulator_model,
             temperature=config.temperature,
             max_concurrency=config.max_concurrency,
             on_usage=self._track_usage,
+            on_event=self._emit,
         )
 
         self._evaluator = TrajectoryEvaluator(
             llm=llm,
             goal=config.goal,
-            model=model,
+            model=judge_model,
             judge_temperature=config.judge_temperature,
             prune_threshold=config.prune_threshold,
             max_concurrency=config.max_concurrency,
@@ -104,11 +120,32 @@ class DTSEngine:
         )
 
         self._researcher = DeepResearcher(
+            llm=llm,
+            model=strategy_model,  # Use strategy model for query distillation
             cache_dir=config.research_cache_dir,
             on_cost=self._track_research_cost,
+            on_event=self._emit,
         )
 
         self._tree: DialogueTree | None = None
+        self._event_callback: EventCallback | None = None
+        self._research_report: str | None = None
+
+    # --- Public Methods ---
+
+    def set_event_callback(self, callback: EventCallback) -> None:
+        """
+        Set a callback for receiving real-time events during the run.
+
+        The callback receives (event_type, data) and should be async.
+        Event types:
+        - "round_started": { round, total_rounds }
+        - "node_added": { node data }
+        - "node_updated": { id, status, score? }
+        - "nodes_pruned": { ids, reasons }
+        - "token_update": { totals }
+        """
+        self._event_callback = callback
 
     async def run(self, rounds: int = 1) -> DTSRunResult:
         """
@@ -122,32 +159,60 @@ class DTSEngine:
         """
         cfg = self.config
 
-        print("\n" + "=" * 60)
-        print("DIALOGUE TREE SEARCH - Starting")
-        print("=" * 60)
-        _log("INIT", f"Goal: {cfg.goal[:50]}...")
-        _log(
+        logger.info("=" * 60)
+        logger.info("DIALOGUE TREE SEARCH - Starting")
+        logger.info("=" * 60)
+        log_phase(logger, "INIT", f"Goal: {cfg.goal[:50]}...")
+        log_phase(
+            logger,
             "INIT",
             f"Branches: {cfg.init_branches} | Turns: {cfg.turns_per_branch} | Rounds: {rounds}",
         )
         if cfg.user_intents_per_branch > 1:
-            _log(
+            log_phase(
+                logger,
                 "INIT",
                 f"User intent forking: {cfg.user_intents_per_branch} intents/branch",
             )
-        _log("INIT", f"Scoring mode: {cfg.scoring_mode}")
+        log_phase(logger, "INIT", f"Scoring mode: {cfg.scoring_mode}")
+
+        # Emit search started event
+        await self._emit(
+            "search_started",
+            {
+                "goal": cfg.goal,
+                "first_message": cfg.first_message,
+                "total_rounds": rounds,
+                "config": {
+                    "init_branches": cfg.init_branches,
+                    "turns_per_branch": cfg.turns_per_branch,
+                    "user_intents_per_branch": cfg.user_intents_per_branch,
+                    "scoring_mode": cfg.scoring_mode,
+                    "prune_threshold": cfg.prune_threshold,
+                },
+            },
+        )
 
         # Initialize tree
-        _log("INIT", "Creating tree structure...")
+        log_phase(logger, "INIT", "Creating tree structure...")
+        await self._emit(
+            "phase", {"phase": "initializing", "message": "Creating tree structure..."}
+        )
         tree = await self._initialize_tree()
         self._tree = tree
 
         total_pruned = 0
 
         for round_num in range(rounds):
-            print("\n" + "-" * 40)
-            _log("ROUND", f"Round {round_num + 1}/{rounds}")
-            print("-" * 40)
+            logger.info("-" * 40)
+            log_phase(logger, "ROUND", f"Round {round_num + 1}/{rounds}")
+            logger.info("-" * 40)
+
+            # Emit round started event
+            await self._emit(
+                "round_started",
+                {"round": round_num + 1, "total_rounds": rounds},
+            )
 
             # Get expandable leaves
             active_leaves = tree.active_leaves()
@@ -160,10 +225,37 @@ class DTSEngine:
                 logger.warning("No expandable nodes")
                 break
 
+            # Emit intent generation phase if forking
+            if cfg.user_intents_per_branch > 1:
+                log_phase(
+                    logger,
+                    "INTENT",
+                    f"Generating {cfg.user_intents_per_branch} user intents per branch...",
+                )
+                await self._emit(
+                    "phase",
+                    {
+                        "phase": "generating_intents",
+                        "message": f"Generating {cfg.user_intents_per_branch} user intents per branch...",
+                        "intents_per_branch": cfg.user_intents_per_branch,
+                        "branch_count": len(expandable),
+                    },
+                )
+
             # Expand branches
-            _log(
+            log_phase(
+                logger,
                 "EXPAND",
                 f"Expanding {len(expandable)} branches ({cfg.turns_per_branch} turns)...",
+            )
+            await self._emit(
+                "phase",
+                {
+                    "phase": "expanding",
+                    "message": f"Expanding {len(expandable)} branches...",
+                    "branch_count": len(expandable),
+                    "turns_per_branch": cfg.turns_per_branch,
+                },
             )
             expanded = await self._simulator.expand_nodes(
                 expandable,
@@ -172,26 +264,74 @@ class DTSEngine:
                 tree=tree,
                 generate_intents=self._generator.generate_intents,
             )
-            _log("EXPAND", f"Completed {len(expanded)} expansions", indent=1)
+            log_phase(
+                logger, "EXPAND", f"Completed {len(expanded)} expansions", indent=1
+            )
+
+            # Emit node_added events for expanded nodes
+            for node in expanded:
+                await self._emit(
+                    "node_added",
+                    {
+                        "id": node.id,
+                        "parent_id": node.parent_id,
+                        "depth": node.depth,
+                        "status": node.status.value,
+                        "strategy": node.strategy.tagline if node.strategy else None,
+                        "user_intent": node.user_intent.label
+                        if node.user_intent
+                        else None,
+                        "message_count": len(node.messages),
+                    },
+                )
 
             # Score branches
+            await self._emit(
+                "phase",
+                {
+                    "phase": "scoring",
+                    "message": f"Scoring {len(expanded)} branches...",
+                    "node_count": len(expanded),
+                    "scoring_mode": cfg.scoring_mode,
+                },
+            )
             if cfg.scoring_mode == "comparative":
-                _log("JUDGE", f"Comparative ranking of {len(expanded)} branches...")
+                log_phase(
+                    logger,
+                    "JUDGE",
+                    f"Comparative ranking of {len(expanded)} branches...",
+                )
                 scores = await self._evaluator.evaluate_comparative(expanded)
             else:
-                _log("JUDGE", f"Scoring {len(expanded)} branches (3 judges each)...")
+                log_phase(
+                    logger,
+                    "JUDGE",
+                    f"Scoring {len(expanded)} branches (3 judges each)...",
+                )
                 scores = await self._evaluator.evaluate_absolute(expanded)
 
-            # Log scores
+            # Log scores and emit events
             for node in expanded:
                 if node.id in scores:
                     score = scores[node.id]
                     strategy = node.strategy.tagline if node.strategy else "unknown"
                     intent = f" [{node.user_intent.label}]" if node.user_intent else ""
-                    _log(
+                    log_phase(
+                        logger,
                         "JUDGE",
                         f"'{strategy}'{intent}: {score.aggregated_score:.1f}/10",
                         indent=1,
+                    )
+                    # Emit score update
+                    await self._emit(
+                        "node_updated",
+                        {
+                            "id": node.id,
+                            "status": "scored",
+                            "score": score.aggregated_score,
+                            "individual_scores": score.individual_scores,
+                            "passed": score.passed,
+                        },
                     )
 
             # Backpropagate
@@ -200,31 +340,81 @@ class DTSEngine:
                     tree.backpropagate(node.id, scores[node.id].aggregated_score)
 
             # Prune
-            _log("PRUNE", f"Pruning (threshold: {cfg.prune_threshold})...")
+            log_phase(logger, "PRUNE", f"Pruning (threshold: {cfg.prune_threshold})...")
+            await self._emit(
+                "phase",
+                {
+                    "phase": "pruning",
+                    "message": f"Pruning branches below {cfg.prune_threshold}...",
+                    "threshold": cfg.prune_threshold,
+                },
+            )
             survivors = self._prune(expanded, scores)
             pruned_count = len(expanded) - len(survivors)
             total_pruned += pruned_count
-            _log("PRUNE", f"Kept {len(survivors)}, pruned {pruned_count}", indent=1)
+            log_phase(
+                logger,
+                "PRUNE",
+                f"Kept {len(survivors)}, pruned {pruned_count}",
+                indent=1,
+            )
+
+            # Emit pruning event
+            pruned_nodes = [n for n in expanded if n.status == NodeStatus.PRUNED]
+            if pruned_nodes:
+                await self._emit(
+                    "nodes_pruned",
+                    {
+                        "ids": [n.id for n in pruned_nodes],
+                        "reasons": {n.id: n.prune_reason for n in pruned_nodes},
+                    },
+                )
+
+            # Emit token update
+            await self._emit(
+                "token_update",
+                {
+                    "totals": {
+                        "input_tokens": self._token_tracker.total_input_tokens,
+                        "output_tokens": self._token_tracker.total_output_tokens,
+                        "total_cost_usd": round(self._token_tracker.total_cost, 6),
+                    }
+                },
+            )
 
             for node in survivors:
                 strategy = node.strategy.tagline if node.strategy else "unknown"
                 intent = f" [{node.user_intent.label}]" if node.user_intent else ""
-                _log("PRUNE", f"Survivor: '{strategy}'{intent}", indent=2)
+                log_phase(logger, "PRUNE", f"Survivor: '{strategy}'{intent}", indent=2)
 
         # Find best
         best_node = tree.best_leaf_by_score()
 
-        print("\n" + "=" * 60)
-        _log("DONE", "Search complete!")
+        logger.info("=" * 60)
+        log_phase(logger, "DONE", "Search complete!")
         if best_node:
             best_strategy = best_node.strategy.tagline if best_node.strategy else "root"
-            _log(
+            log_phase(
+                logger,
                 "DONE",
                 f"Best: '{best_strategy}' with score {best_node.stats.aggregated_score:.1f}/10",
             )
-        print("=" * 60 + "\n")
+        logger.info("=" * 60)
 
         self._token_tracker.print_summary()
+
+        # Emit completion event
+        await self._emit(
+            "phase",
+            {
+                "phase": "complete",
+                "message": "Search complete!",
+                "best_score": best_node.stats.aggregated_score if best_node else 0.0,
+                "best_strategy": best_node.strategy.tagline
+                if best_node and best_node.strategy
+                else None,
+            },
+        )
 
         return DTSRunResult(
             best_node_id=best_node.id if best_node else None,
@@ -234,7 +424,14 @@ class DTSEngine:
             pruned_count=total_pruned,
             token_usage=self._token_tracker.to_dict(),
             total_rounds=rounds,
+            research_report=self._research_report,
         )
+
+    # --- Private Methods ---
+
+    async def _emit(self, event_type: str, data: dict) -> None:
+        """Emit an event if callback is set."""
+        await emit_event(self._event_callback, event_type, data, logger)
 
     async def _initialize_tree(self) -> DialogueTree:
         """Initialize tree with root and initial strategy branches."""
@@ -248,18 +445,50 @@ class DTSEngine:
         )
         tree = DialogueTree.create(root)
 
-        # Generate strategies
-        _log("INIT", "Generating strategies...", indent=1)
+        # Deep research if enabled
+        if cfg.deep_research:
+            log_phase(logger, "INIT", "Conducting deep research...", indent=1)
+            await self._emit(
+                "phase",
+                {
+                    "phase": "researching",
+                    "message": "Conducting deep research on the topic...",
+                },
+            )
         deep_context = await self._get_deep_research_context()
+
+        # Pass research context to evaluator for informed judging
+        if deep_context:
+            self._evaluator.set_research_context(deep_context)
+
+        # Generate strategies
+        log_phase(logger, "INIT", "Generating strategies...", indent=1)
+        await self._emit(
+            "phase",
+            {
+                "phase": "generating_strategies",
+                "message": f"Generating {cfg.init_branches} conversation strategies...",
+                "count": cfg.init_branches,
+            },
+        )
         strategies = await self._generator.generate_strategies(
             cfg.first_message,
             cfg.init_branches,
             deep_context,
         )
-        _log("INIT", f"Generated {len(strategies)} strategies:", indent=1)
+        log_phase(logger, "INIT", f"Generated {len(strategies)} strategies:", indent=1)
 
         for i, strategy in enumerate(strategies, 1):
-            _log("INIT", f"{i}. {strategy.tagline}", indent=2)
+            log_phase(logger, "INIT", f"{i}. {strategy.tagline}", indent=2)
+            await self._emit(
+                "strategy_generated",
+                {
+                    "index": i,
+                    "total": len(strategies),
+                    "tagline": strategy.tagline,
+                    "description": strategy.description,
+                },
+            )
 
         # Create children
         for strategy in strategies:
@@ -270,7 +499,12 @@ class DTSEngine:
             )
             tree.add_child(root.id, child)
 
-        _log("INIT", f"Tree initialized with {len(strategies)} branches", indent=1)
+        log_phase(
+            logger,
+            "INIT",
+            f"Tree initialized with {len(strategies)} branches",
+            indent=1,
+        )
         return tree
 
     def _prune(
@@ -303,7 +537,9 @@ class DTSEngine:
         if len(survivors) < cfg.min_survivors:
             ranked = sorted(
                 nodes,
-                key=lambda n: scores.get(n.id, self._zero_score()).aggregated_score,
+                key=lambda n: scores.get(
+                    n.id, AggregatedScore.zero(cfg.prune_threshold)
+                ).aggregated_score,
                 reverse=True,
             )
             survivors = ranked[: cfg.min_survivors]
@@ -323,46 +559,39 @@ class DTSEngine:
 
         return survivors
 
-    def _zero_score(self) -> AggregatedScore:
-        """Create a zero score for fallback."""
-        return AggregatedScore(
-            individual_scores=[0, 0, 0],
-            aggregated_score=0,
-            pass_threshold=self.config.prune_threshold,
-            pass_votes=0,
-            passed=False,
-        )
-
     async def _get_deep_research_context(self) -> str | None:
         """Get deep research context using DeepResearcher."""
         if not self.config.deep_research:
             return None
 
-        return await self._researcher.research(
+        report = await self._researcher.research(
             goal=self.config.goal,
             first_message=self.config.first_message,
         )
+        self._research_report = report
+        return report
 
     def _track_research_cost(self, cost_usd: float) -> None:
         """Track external research costs (from GPT Researcher)."""
         self._token_tracker.research_cost_usd += cost_usd
 
     def _track_usage(self, completion: Completion, phase: str) -> None:
-        """Track token usage by phase."""
+        """Track token usage by phase and model."""
         if not completion.usage:
             return
 
-        tracker = self._token_tracker
-        if phase == "strategy":
-            tracker.strategy_generation.add(completion.usage)
-        elif phase == "intent":
-            tracker.intent_generation.add(completion.usage)
-        elif phase == "user":
-            tracker.user_simulation.add(completion.usage)
-        elif phase == "assistant":
-            tracker.assistant_generation.add(completion.usage)
-        elif phase == "judge":
-            tracker.judging.add(completion.usage)
+        # Map phase names to TokenTracker attribute names
+        phase_map = {
+            "strategy": "strategy_generation",
+            "intent": "intent_generation",
+            "user": "user_simulation",
+            "assistant": "assistant_generation",
+            "judge": "judging",
+        }
+
+        tracker_phase = phase_map.get(phase, phase)
+        model = completion.model or self._token_tracker.model_name
+        self._token_tracker.add_usage(model, completion.usage, tracker_phase)
 
     @property
     def tree(self) -> DialogueTree | None:

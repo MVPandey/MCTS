@@ -1,25 +1,46 @@
 """Deep research component using GPT Researcher."""
 
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
+from collections.abc import Awaitable
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Any, Callable
 
+from backend.core.dts.utils import emit_event, log_phase
+from backend.llm.types import Message
 from backend.utils.config import config
 
+if TYPE_CHECKING:
+    from backend.llm.client import LLM
+
+# -----------------------------------------------------------------------------
+# Module Setup
+# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
+# -----------------------------------------------------------------------------
+# Constants
+# -----------------------------------------------------------------------------
+# Global semaphore to limit concurrent research requests
+_research_semaphore = asyncio.Semaphore(5)
 
-def _log(phase: str, message: str, indent: int = 0) -> None:
-    """Print a formatted log message."""
-    prefix = "  " * indent
-    print(f"[DTS:{phase}] {prefix}{message}")
+# -----------------------------------------------------------------------------
+# Type Aliases
+# -----------------------------------------------------------------------------
+EventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
+# -----------------------------------------------------------------------------
+# Class: DeepResearcher
+# -----------------------------------------------------------------------------
 class DeepResearcher:
     """
     Conducts deep research using gpt-researcher package.
@@ -28,27 +49,45 @@ class DeepResearcher:
     the conversation goal and initial message.
     """
 
+    QUERY_DISTILL_PROMPT = """Distill the following conversation goal and opening message into a single, focused research query. The query should capture the essential topic and context needed for web research.
+
+Goal: {goal}
+First message: {first_message}
+
+Write a single sentence research query that will help gather relevant domain knowledge, tactics, and context. Output ONLY the query, nothing else."""
+
     def __init__(
         self,
+        llm: LLM,
+        model: str | None = None,
         cache_dir: str = ".cache/research",
         on_cost: Callable[[float], None] | None = None,
+        on_event: EventCallback | None = None,
     ) -> None:
         """
         Initialize the researcher.
 
         Args:
+            llm: LLM client for query generation.
+            model: Model to use for query distillation.
             cache_dir: Directory for caching research results.
             on_cost: Callback for tracking external USD costs.
+            on_event: Async callback for emitting events to UI.
         """
+        self.llm = llm
+        self.model = model
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._on_cost = on_cost
+        self._on_event = on_event
+
+    # --- Public Methods ---
 
     async def research(
         self,
         goal: str,
         first_message: str,
-        report_type: str = "research_report",
+        report_type: str = "deep",
     ) -> str:
         """
         Conduct research on the conversation goal and context.
@@ -69,40 +108,80 @@ class DeepResearcher:
         cache_key = self._get_cache_key(goal, first_message)
         cached = self._load_cache(cache_key)
         if cached:
-            _log("RESEARCH", f"Cache hit: {cache_key[:8]}...", indent=1)
+            log_phase(logger, "RESEARCH", f"Cache hit: {cache_key[:8]}...", indent=1)
+            await self._emit(
+                "research_log",
+                {"message": "Using cached research results", "type": "cache_hit"},
+            )
             return cached
 
         # Validate dependencies and setup environment
         self._validate_requirements()
         self._setup_environment()
 
-        # Construct research query
-        query = self._build_query(goal, first_message)
+        # Generate research query via LLM
+        await self._emit(
+            "research_log",
+            {"message": "Generating research query...", "type": "progress"},
+        )
+        query = await self._generate_query(goal, first_message)
+        log_phase(logger, "RESEARCH", f"Generated query: {query}", indent=1)
 
-        # Run research
+        # Run research with rate limiting
         try:
             from gpt_researcher import GPTResearcher
 
-            _log("RESEARCH", f"Starting deep research for: {goal[:50]}...", indent=1)
+            log_phase(
+                logger,
+                "RESEARCH",
+                f"Starting deep research for: {goal[:50]}...",
+                indent=1,
+            )
+            await self._emit(
+                "research_log",
+                {"message": f"Researching: {goal[:80]}...", "type": "start"},
+            )
 
             researcher = GPTResearcher(
                 query=query,
                 report_type=report_type,
             )
 
-            await researcher.conduct_research()
-            report = await researcher.write_report()
+            # Rate limit concurrent research requests (max 5)
+            async with _research_semaphore:
+                # Conduct research with progress updates
+                await self._emit(
+                    "research_log",
+                    {
+                        "message": "Searching for relevant sources...",
+                        "type": "progress",
+                    },
+                )
+                await researcher.conduct_research()
+
+                await self._emit(
+                    "research_log",
+                    {"message": "Writing research report...", "type": "progress"},
+                )
+                report = await researcher.write_report()
 
             # Track external cost
             cost = researcher.get_costs()
             if self._on_cost and cost:
                 self._on_cost(cost)
-                _log("RESEARCH", f"Research cost: ${cost:.4f}", indent=1)
+                log_phase(logger, "RESEARCH", f"Research cost: ${cost:.4f}", indent=1)
 
             # Cache result
             self._save_cache(cache_key, report)
-            _log(
-                "RESEARCH", f"Research complete, cached as {cache_key[:8]}...", indent=1
+            log_phase(
+                logger,
+                "RESEARCH",
+                f"Research complete, cached as {cache_key[:8]}...",
+                indent=1,
+            )
+            await self._emit(
+                "research_log",
+                {"message": "Research complete", "type": "complete"},
             )
 
             return report
@@ -112,6 +191,12 @@ class DeepResearcher:
                 "gpt-researcher not installed. Run: pip install gpt-researcher"
             )
 
+    # --- Private Methods ---
+
+    async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
+        """Emit an event if callback is set."""
+        await emit_event(self._on_event, event_type, data, logger)
+
     def _setup_environment(self) -> None:
         """
         Inject config values into os.environ for gpt-researcher.
@@ -119,19 +204,16 @@ class DeepResearcher:
         GPT Researcher reads directly from environment variables,
         so we need to bridge our Pydantic config to os.environ.
         """
-        print("[DEBUG] Setting up environment for GPT Researcher...")
-        print(f"[DEBUG] config.openai_api_key exists: {bool(config.openai_api_key)}")
-        print(f"[DEBUG] config.tavily_api_key exists: {bool(config.tavily_api_key)}")
-        print(f"[DEBUG] config.fast_llm: {config.fast_llm}")
-        print(f"[DEBUG] config.smart_llm: {config.smart_llm}")
-        print(f"[DEBUG] config.strategic_llm: {config.strategic_llm}")
+        logger.debug("Setting up environment for GPT Researcher")
+        logger.debug(
+            f"API keys present - OpenAI: {bool(config.openai_api_key)}, Firecrawl: {bool(config.firecrawl_api_key)}"
+        )
 
         # OpenRouter API key
         if config.openai_api_key:
             os.environ["OPENROUTER_API_KEY"] = config.openrouter_api_key
             os.environ["OPENAI_BASE_URL"] = config.openai_base_url
-            print(f"[DEBUG] Set OPENAI_BASE_URL: {config.openai_base_url}")
-            print(f"[DEBUG] Set OPENROUTER_API_KEY: {config.openai_api_key[:10]}...")
+            logger.debug(f"Set OPENAI_BASE_URL: {config.openai_base_url}")
 
         # LLM configurations for gpt-researcher
         if config.fast_llm:
@@ -141,10 +223,12 @@ class DeepResearcher:
         if config.strategic_llm:
             os.environ["STRATEGIC_LLM"] = config.strategic_llm
 
-        # Tavily for web search
-        if config.tavily_api_key:
-            os.environ["TAVILY_API_KEY"] = config.tavily_api_key
-            print(f"[DEBUG] Set TAVILY_API_KEY: {config.tavily_api_key[:10]}...")
+        # Web scraper configuration
+        if config.scraper:
+            os.environ["SCRAPER"] = config.scraper
+        if config.firecrawl_api_key:
+            os.environ["FIRECRAWL_API_KEY"] = config.firecrawl_api_key
+        os.environ["MAX_SCRAPER_WORKERS"] = str(config.max_scraper_workers)
 
         # Embedding configuration
         if config.embedding_api_key:
@@ -152,26 +236,39 @@ class DeepResearcher:
         if config.embedding_model_name:
             os.environ["EMBEDDING_MODEL"] = config.embedding_model_name
 
-        print("[DEBUG] Environment setup complete")
+        logger.debug("Environment setup complete")
 
     def _validate_requirements(self) -> None:
         """Validate required API keys are present."""
         if not config.openai_api_key:
             raise ValueError("OPENAI_API_KEY required for deep_research=True.")
-        if not config.tavily_api_key:
+        if not config.firecrawl_api_key:
             raise ValueError(
-                "TAVILY_API_KEY required for deep_research=True. "
-                "Get one at https://tavily.com"
+                "FIRECRAWL_API_KEY required for deep_research=True. "
+                "Get one at https://firecrawl.dev"
             )
 
-    def _build_query(self, goal: str, first_message: str) -> str:
-        """Build research query from goal and context."""
-        return (
-            f"Research strategic approaches and domain knowledge for achieving: {goal}. "
-            f"Context: The conversation starts with the user saying: '{first_message}'. "
-            "Focus on: psychological tactics, persuasion techniques, domain facts, "
-            "potential objections and counter-arguments, and negotiation strategies."
+    async def _generate_query(self, goal: str, first_message: str) -> str:
+        """Generate a focused research query using the LLM."""
+        prompt = self.QUERY_DISTILL_PROMPT.format(
+            goal=goal,
+            first_message=first_message,
         )
+
+        try:
+            completion = await self.llm.complete(
+                [Message.user(prompt)],
+                model=self.model,
+                temperature=0.3,
+            )
+            query = (completion.message.content or "").strip()
+            if query:
+                return query
+        except Exception as e:
+            logger.warning(f"Query generation failed, using fallback: {e}")
+
+        # Fallback to simple concatenation
+        return f"{goal} - {first_message}"
 
     def _get_cache_key(self, goal: str, first_message: str) -> str:
         """Generate cache key from inputs."""

@@ -19,3 +19,5 @@ wheels/
 CLAUDE.md
 mcts_output.json
 dts_output.json
+gpt-researcher/
+.cache/

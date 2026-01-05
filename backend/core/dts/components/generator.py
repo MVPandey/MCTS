@@ -1,5 +1,8 @@
 """Strategy and intent generation component for DTS."""
 
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
 import asyncio
@@ -7,21 +10,22 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable
 
 from backend.core.dts.types import Strategy, UserIntent
+from backend.core.dts.utils import format_message_history
 from backend.core.prompts import prompts
 from backend.llm.types import Message
 
 if TYPE_CHECKING:
     from backend.llm.client import LLM
 
+# -----------------------------------------------------------------------------
+# Module Setup
+# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
 
-def _log(phase: str, message: str, indent: int = 0) -> None:
-    """Print a formatted log message."""
-    prefix = "  " * indent
-    print(f"[DTS:{phase}] {prefix}{message}")
-
-
+# -----------------------------------------------------------------------------
+# Class: StrategyGenerator
+# -----------------------------------------------------------------------------
 class StrategyGenerator:
     """
     Generates conversation strategies and user intents.
@@ -114,7 +118,7 @@ class StrategyGenerator:
         prompt = prompts.user_intent_generator(
             num_intents=count,
             conversation_goal=self.goal,
-            conversation_history=self._format_history(history),
+            conversation_history=format_message_history(history),
         )
 
         result = await self._call_llm_json(prompt, phase="intent")
@@ -142,42 +146,7 @@ class StrategyGenerator:
 
         return intents
 
-    async def generate_intents_batch(
-        self,
-        histories: list[list[Message]],
-        count: int,
-    ) -> list[list[UserIntent]]:
-        """
-        Generate intents for multiple histories in parallel.
-
-        Args:
-            histories: List of conversation histories.
-            count: Number of intents per history.
-
-        Returns:
-            List of intent lists (one per history).
-        """
-        tasks = [self.generate_intents(h, count) for h in histories]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        output = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning(f"Intent generation failed: {result}")
-                output.append([])
-            else:
-                output.append(result)
-
-        return output
-
-    def _format_history(self, messages: list[Message]) -> str:
-        """Format messages for prompts."""
-        lines = []
-        for msg in messages:
-            role = msg.role.capitalize()
-            content = msg.content or ""
-            lines.append(f"{role}: {content}")
-        return "\n\n".join(lines)
+    # --- Private Methods ---
 
     async def _call_llm_json(
         self, prompt: str, phase: str = "other"

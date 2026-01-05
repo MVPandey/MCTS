@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DTS Visualizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@14.1.4/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: {
+                            bg: '#0f0f0f',
+                            card: '#1a1a1a',
+                            border: '#2a2a2a',
+                            hover: '#252525',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .log-scroll { max-height: 400px; overflow-y: auto; }
+        .log-scroll::-webkit-scrollbar { width: 6px; }
+        .log-scroll::-webkit-scrollbar-track { background: #1a1a1a; }
+        .log-scroll::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 3px; }
+    </style>
+</head>
+<body class="bg-dark-bg text-gray-100 min-h-screen">
+    <div class="max-w-4xl mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="mb-8">
+            <h1 class="text-2xl font-semibold text-white">Dialogue Tree Search</h1>
+            <p class="text-gray-500 text-sm mt-1">Explore conversation strategies with Monte Carlo Tree Search</p>
+        </header>
+
+        <!-- Config Form (State: idle) -->
+        <div id="config-view" class="space-y-6">
+            <!-- Goal -->
+            <div>
+                <label for="goal" class="block text-sm font-medium text-gray-300 mb-2">Conversation Goal</label>
+                <textarea
+                    id="goal"
+                    rows="2"
+                    class="w-full bg-dark-card border border-dark-border rounded-lg px-4 py-3 text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none"
+                    placeholder="e.g., Identify the most promising direction for a research paper"
+                ></textarea>
+            </div>
+
+            <!-- First Message -->
+            <div>
+                <label for="first-message" class="block text-sm font-medium text-gray-300 mb-2">First Message (User)</label>
+                <textarea
+                    id="first-message"
+                    rows="2"
+                    class="w-full bg-dark-card border border-dark-border rounded-lg px-4 py-3 text-gray-100 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none"
+                    placeholder="e.g., I want to improve the Muon optimizer to increase training speed/performance, specifically for the world record nano-gpt run"
+                ></textarea>
+            </div>
+
+            <!-- Parameters -->
+            <div class="bg-dark-card border border-dark-border rounded-lg p-4">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-medium text-gray-300">Parameters</h3>
+                    <button
+                        id="toggle-params"
+                        class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                        onclick="toggleParams()"
+                    >Show advanced</button>
+                </div>
+
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <!-- Init Branches -->
+                    <div>
+                        <label for="init-branches" class="block text-xs text-gray-500 mb-1">Branches</label>
+                        <input
+                            type="number"
+                            id="init-branches"
+                            value="6"
+                            min="1"
+                            max="20"
+                            class="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                        >
+                    </div>
+
+                    <!-- Turns -->
+                    <div>
+                        <label for="turns" class="block text-xs text-gray-500 mb-1">Turns/Branch</label>
+                        <input
+                            type="number"
+                            id="turns"
+                            value="5"
+                            min="1"
+                            max="20"
+                            class="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                        >
+                    </div>
+
+                    <!-- Rounds -->
+                    <div>
+                        <label for="rounds" class="block text-xs text-gray-500 mb-1">Rounds</label>
+                        <input
+                            type="number"
+                            id="rounds"
+                            value="1"
+                            min="1"
+                            max="10"
+                            class="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                        >
+                    </div>
+
+                    <!-- Deep Research Toggle -->
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">Deep Research</label>
+                        <button
+                            type="button"
+                            id="deep-research-toggle"
+                            onclick="toggleDeepResearch()"
+                            class="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-400 hover:border-blue-500 transition-colors flex items-center justify-between"
+                        >
+                            <span id="deep-research-label">Off</span>
+                            <span id="deep-research-indicator" class="w-3 h-3 rounded-full bg-gray-600"></span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Advanced Parameters (hidden by default) -->
+                <div id="advanced-params" class="hidden mt-4 pt-4 border-t border-dark-border grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <!-- User Intents -->
+                    <div>
+                        <label for="intents" class="block text-xs text-gray-500 mb-1">Intents/Branch</label>
+                        <input
+                            type="number"
+                            id="intents"
+                            value="3"
+                            min="1"
+                            max="10"
+                            class="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                        >
+                    </div>
+
+                    <!-- Prune Threshold -->
+                    <div>
+                        <label for="threshold" class="block text-xs text-gray-500 mb-1">Prune Threshold</label>
+                        <input
+                            type="number"
+                            id="threshold"
+                            value="6.5"
+                            min="0"
+                            max="10"
+                            step="0.5"
+                            class="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                        >
+                    </div>
+
+                    <!-- Scoring Mode -->
+                    <div>
+                        <label for="scoring-mode" class="block text-xs text-gray-500 mb-1">Scoring Mode</label>
+                        <select
+                            id="scoring-mode"
+                            class="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                        >
+                            <option value="comparative">Comparative</option>
+                            <option value="absolute">Absolute</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Model Settings (collapsible) -->
+                <div id="model-settings" class="hidden mt-4 pt-4 border-t border-dark-border">
+                    <button
+                        type="button"
+                        onclick="toggleModelSettings()"
+                        class="flex items-center justify-between w-full text-left mb-3"
+                    >
+                        <span class="text-xs text-gray-400">Model Settings</span>
+                        <span id="model-settings-icon" class="text-gray-500 text-xs">+</span>
+                    </button>
+                    <div id="model-settings-content" class="hidden space-y-3">
+                        <div id="models-loading" class="text-xs text-gray-500">Loading available models...</div>
+                        <div id="models-error" class="text-xs text-red-400 hidden"></div>
+
+                        <!-- Strategy Model -->
+                        <div>
+                            <label for="strategy-model" class="block text-xs text-gray-500 mb-1">
+                                Strategy Generation
+                                <span class="text-gray-600">(strategies & intents)</span>
+                            </label>
+                            <select
+                                id="strategy-model"
+                                class="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                            >
+                                <option value="">Use Default</option>
+                            </select>
+                            <div id="strategy-model-info" class="text-xs text-gray-600 mt-1"></div>
+                        </div>
+
+                        <!-- Simulator Model -->
+                        <div>
+                            <label for="simulator-model" class="block text-xs text-gray-500 mb-1">
+                                Simulation
+                                <span class="text-gray-600">(user & assistant messages)</span>
+                            </label>
+                            <select
+                                id="simulator-model"
+                                class="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                            >
+                                <option value="">Use Default</option>
+                            </select>
+                            <div id="simulator-model-info" class="text-xs text-gray-600 mt-1"></div>
+                        </div>
+
+                        <!-- Judge Model -->
+                        <div>
+                            <label for="judge-model" class="block text-xs text-gray-500 mb-1">
+                                Judging
+                                <span class="text-gray-600">(trajectory evaluation)</span>
+                            </label>
+                            <select
+                                id="judge-model"
+                                class="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                            >
+                                <option value="">Use Default</option>
+                            </select>
+                            <div id="judge-model-info" class="text-xs text-gray-600 mt-1"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Execute Button -->
+            <button
+                id="execute-btn"
+                onclick="startExploration()"
+                class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-dark-bg"
+            >
+                Start Exploration
+            </button>
+        </div>
+
+        <!-- Progress View (State: running) -->
+        <div id="progress-view" class="hidden fade-in">
+            <!-- Progress Header -->
+            <div class="flex items-center justify-between mb-4">
+                <div>
+                    <h2 class="text-lg font-medium text-white" id="progress-title">Initializing...</h2>
+                    <p class="text-sm text-gray-500" id="progress-subtitle">Setting up tree structure</p>
+                </div>
+                <div class="text-right">
+                    <div class="text-2xl font-semibold text-white" id="progress-score">--</div>
+                    <div class="text-xs text-gray-500">Best Score</div>
+                </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div class="w-full bg-dark-card rounded-full h-2 mb-6">
+                <div id="progress-bar" class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+
+            <!-- Stats -->
+            <div class="grid grid-cols-4 gap-4 mb-6">
+                <div class="bg-dark-card border border-dark-border rounded-lg p-3 text-center">
+                    <div class="text-lg font-semibold text-white" id="stat-strategies">0</div>
+                    <div class="text-xs text-gray-500">Strategies</div>
+                </div>
+                <div class="bg-dark-card border border-dark-border rounded-lg p-3 text-center">
+                    <div class="text-lg font-semibold text-white" id="stat-nodes">0</div>
+                    <div class="text-xs text-gray-500">Nodes</div>
+                </div>
+                <div class="bg-dark-card border border-dark-border rounded-lg p-3 text-center">
+                    <div class="text-lg font-semibold text-white" id="stat-pruned">0</div>
+                    <div class="text-xs text-gray-500">Pruned</div>
+                </div>
+                <div class="bg-dark-card border border-dark-border rounded-lg p-3 text-center">
+                    <div class="text-lg font-semibold text-white" id="stat-round">1</div>
+                    <div class="text-xs text-gray-500">Round</div>
+                </div>
+            </div>
+
+            <!-- Activity Log -->
+            <div class="bg-dark-card border border-dark-border rounded-lg">
+                <div class="px-4 py-3 border-b border-dark-border">
+                    <h3 class="text-sm font-medium text-gray-300">Activity Log</h3>
+                </div>
+                <div id="activity-log" class="log-scroll p-4 space-y-2 font-mono text-xs">
+                    <!-- Log entries will be added here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Results View (State: complete) -->
+        <div id="results-view" class="hidden fade-in">
+            <!-- Results Header -->
+            <div class="flex items-center justify-between mb-6">
+                <div>
+                    <h2 class="text-lg font-medium text-white">Exploration Complete</h2>
+                    <p class="text-sm text-gray-500"><span id="results-model">--</span></p>
+                </div>
+                <div class="text-right">
+                    <div class="text-3xl font-bold text-green-400" id="results-score">--</div>
+                    <div class="text-xs text-gray-500">Best Score</div>
+                </div>
+            </div>
+
+            <!-- Branch Selector -->
+            <div class="bg-dark-card border border-dark-border rounded-lg mb-6 p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-sm font-medium text-gray-300">Browse Conversations</h3>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-gray-500" id="branch-count">0 branches</span>
+                        <select
+                            id="branch-selector"
+                            onchange="selectBranch(this.value)"
+                            class="bg-dark-bg border border-dark-border rounded px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                        >
+                            <option value="">Select a branch...</option>
+                        </select>
+                    </div>
+                </div>
+                <!-- Selected Branch Info -->
+                <div id="selected-branch-info" class="hidden">
+                    <div class="flex items-center gap-3 p-3 bg-dark-bg rounded-lg">
+                        <div class="flex-1">
+                            <div class="text-sm font-medium text-white" id="branch-strategy">--</div>
+                            <div class="text-xs text-gray-500" id="branch-intent">--</div>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-lg font-semibold" id="branch-score">--</div>
+                            <div class="text-xs" id="branch-status">--</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Conversation Display -->
+            <div class="bg-dark-card border border-dark-border rounded-lg mb-6">
+                <div class="px-4 py-3 border-b border-dark-border flex items-center justify-between">
+                    <h3 class="text-sm font-medium text-gray-300">Conversation</h3>
+                    <span id="results-intent" class="text-xs text-gray-500 bg-dark-bg px-2 py-1 rounded">--</span>
+                </div>
+                <div id="conversation" class="p-4 space-y-4 max-h-96 overflow-y-auto">
+                    <!-- Messages will be added here -->
+                </div>
+            </div>
+
+            <!-- Judge Scores -->
+            <div id="judge-scores-panel" class="bg-dark-card border border-dark-border rounded-lg mb-6 p-4 hidden">
+                <h3 class="text-sm font-medium text-gray-300 mb-3">Judge Scores</h3>
+                <div id="judge-scores" class="flex gap-2">
+                    <!-- Score badges will be added here -->
+                </div>
+                <div id="judge-summary" class="mt-3 text-xs text-gray-400 hidden"></div>
+            </div>
+
+            <!-- Deep Research Report (collapsible) -->
+            <div id="research-panel" class="bg-dark-card border border-dark-border rounded-lg mb-6 hidden">
+                <button
+                    onclick="toggleResearchReport()"
+                    class="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-dark-hover transition-colors rounded-lg"
+                >
+                    <h3 class="text-sm font-medium text-gray-300">Deep Research Report</h3>
+                    <span id="research-toggle-icon" class="text-gray-500">+</span>
+                </button>
+                <div id="research-content" class="hidden px-4 pb-4">
+                    <div id="research-report" class="prose prose-invert prose-sm max-w-none text-gray-300 text-sm leading-relaxed max-h-96 overflow-y-auto"></div>
+                </div>
+            </div>
+
+            <!-- Token Usage & Stats -->
+            <div class="bg-dark-card border border-dark-border rounded-lg mb-6 p-4">
+                <h3 class="text-sm font-medium text-gray-300 mb-3">Usage Statistics</h3>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+                    <div>
+                        <div class="text-lg font-semibold text-white" id="tokens-input">--</div>
+                        <div class="text-xs text-gray-500">Input Tokens</div>
+                    </div>
+                    <div>
+                        <div class="text-lg font-semibold text-white" id="tokens-output">--</div>
+                        <div class="text-xs text-gray-500">Output Tokens</div>
+                    </div>
+                    <div>
+                        <div class="text-lg font-semibold text-white" id="tokens-requests">--</div>
+                        <div class="text-xs text-gray-500">LLM Requests</div>
+                    </div>
+                    <div>
+                        <div class="text-lg font-semibold text-green-400" id="tokens-cost">--</div>
+                        <div class="text-xs text-gray-500">Total Cost</div>
+                    </div>
+                </div>
+                <!-- Detailed breakdown -->
+                <div id="usage-breakdown" class="mt-4 pt-4 border-t border-dark-border hidden">
+                    <div class="text-xs text-gray-500 mb-2">By Phase</div>
+                    <div id="phase-breakdown" class="space-y-1 text-xs font-mono"></div>
+                </div>
+            </div>
+
+            <!-- Run Again Button -->
+            <button
+                onclick="resetToConfig()"
+                class="w-full bg-dark-card hover:bg-dark-hover border border-dark-border text-gray-300 font-medium py-3 px-4 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-gray-500"
+            >
+                Run Another Exploration
+            </button>
+        </div>
+
+        <!-- Error View -->
+        <div id="error-view" class="hidden fade-in">
+            <div class="bg-red-900/20 border border-red-800 rounded-lg p-6 text-center">
+                <div class="text-red-400 text-lg font-medium mb-2">Error</div>
+                <p id="error-message" class="text-gray-400 text-sm">Something went wrong</p>
+                <button
+                    onclick="resetToConfig()"
+                    class="mt-4 bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+                >
+                    Try Again
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

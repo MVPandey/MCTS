@@ -1,5 +1,8 @@
 """Dialogue Tree container and operations."""
 
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
 import uuid
@@ -9,10 +12,19 @@ from pydantic import BaseModel, Field
 
 from backend.core.dts.types import DialogueNode, NodeStatus
 
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+
 
 def generate_node_id() -> str:
     """Generate a unique node ID."""
     return str(uuid.uuid4())
+
+
+# -----------------------------------------------------------------------------
+# Class: DialogueTree
+# -----------------------------------------------------------------------------
 
 
 class DialogueTree(BaseModel):

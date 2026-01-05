@@ -1,11 +1,21 @@
 """Configuration for Dialogue Tree Search."""
 
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
 
+# -----------------------------------------------------------------------------
+# Type Aliases
+# -----------------------------------------------------------------------------
 ScoringMode = Literal["absolute", "comparative"]
+
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
 
 
 @dataclass
@@ -25,7 +35,10 @@ class DTSConfig:
         keep_top_k: Keep only top K branches after pruning (optional).
         min_survivors: Minimum branches to keep even if below threshold.
         max_concurrency: Maximum concurrent LLM calls.
-        model: Model to use for completions.
+        model: Default model to use (fallback for per-phase models).
+        strategy_model: Model for strategy/intent generation.
+        simulator_model: Model for conversation simulation.
+        judge_model: Model for trajectory evaluation.
         temperature: Temperature for conversation generation.
         judge_temperature: Temperature for judge evaluations (lower = more deterministic).
     """
@@ -43,5 +56,8 @@ class DTSConfig:
     min_survivors: int = 1
     max_concurrency: int = 16
     model: str | None = None
+    strategy_model: str | None = None
+    simulator_model: str | None = None
+    judge_model: str | None = None
     temperature: float = 0.7
     judge_temperature: float = 0.3

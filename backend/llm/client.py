@@ -1,3 +1,6 @@
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -6,7 +9,6 @@ from openai import AsyncOpenAI, APIError, AuthenticationError as OpenAIAuthError
 from openai import RateLimitError as OpenAIRateLimitError
 
 from ..utils.config import config
-
 from .errors import (
     AuthenticationError,
     ContentFilterError,
@@ -17,9 +19,12 @@ from .errors import (
     ModelNotFoundError,
     RateLimitError,
 )
-
 from .tools import Tool, ToolRegistry
 from .types import Completion, Function, Message, ToolCall, Usage
+
+# -----------------------------------------------------------------------------
+# Class: LLM
+# -----------------------------------------------------------------------------
 
 
 class LLM:
@@ -34,6 +39,8 @@ class LLM:
         response = await llm.complete("Hello!")
         print(response.message.content)
     """
+
+    # --- Initialization ---
 
     def __init__(
         self,
@@ -60,6 +67,8 @@ class LLM:
             max_retries=max_retries,
         )
         self._default_model = model
+
+    # --- Public Methods ---
 
     async def complete(
         self,
@@ -104,21 +113,15 @@ class LLM:
 
         prepared_messages = self._prepare_messages(messages)
 
-        request_params: dict[str, Any] = {
-            "model": model,
-            "messages": prepared_messages,
-        }
-
-        if temperature is not None:
-            request_params["temperature"] = temperature
-        if max_tokens is not None:
-            request_params["max_tokens"] = max_tokens
-        if tools is not None:
-            request_params["tools"] = tools
-        if tool_choice is not None:
-            request_params["tool_choice"] = tool_choice
-        if stop is not None:
-            request_params["stop"] = stop
+        request_params = self._build_request_params(
+            model=model,
+            messages=prepared_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            stop=stop,
+        )
 
         if structured_output:
             kwargs["response_format"] = {"type": "json_object"}
@@ -136,10 +139,6 @@ class LLM:
             try:
                 response = await self._client.chat.completions.create(
                     **request_params,
-                    extra_body={
-                        "reasoning": {"enabled": False},
-                        "provider": {"order": ["fireworks"], "allow_fallbacks": True},
-                    },
                 )
             except OpenAIAuthError as e:
                 raise AuthenticationError(str(e)) from e
@@ -202,23 +201,16 @@ class LLM:
 
         prepared_messages = self._prepare_messages(messages)
 
-        request_params: dict[str, Any] = {
-            "model": model,
-            "messages": prepared_messages,
-            "stream": True,
-        }
-
-        if temperature is not None:
-            request_params["temperature"] = temperature
-        if max_tokens is not None:
-            request_params["max_tokens"] = max_tokens
-        if tools is not None:
-            request_params["tools"] = tools
-        if tool_choice is not None:
-            request_params["tool_choice"] = tool_choice
-        if stop is not None:
-            request_params["stop"] = stop
-
+        request_params = self._build_request_params(
+            model=model,
+            messages=prepared_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            stop=stop,
+            stream=True,
+        )
         request_params.update(kwargs)
 
         try:
@@ -292,6 +284,38 @@ class LLM:
 
         return response
 
+    # --- Private Methods ---
+
+    def _build_request_params(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        stop: list[str] | str | None = None,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """Build request parameters for OpenAI API call."""
+        params: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+        }
+        if stream:
+            params["stream"] = True
+        if temperature is not None:
+            params["temperature"] = temperature
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+        if tools is not None:
+            params["tools"] = tools
+        if tool_choice is not None:
+            params["tool_choice"] = tool_choice
+        if stop is not None:
+            params["stop"] = stop
+        return params
+
     def _prepare_messages(
         self, messages: list[Message] | Message | str
     ) -> list[dict[str, Any]]:
@@ -304,6 +328,8 @@ class LLM:
 
     def _parse_response(self, response: Any) -> Completion:
         """Parse OpenAI response into Completion."""
+        if not response.choices:
+            raise LLMError("Empty response from API: no choices returned")
         choice = response.choices[0]
         msg = choice.message
 

@@ -1,8 +1,15 @@
 """Majority vote aggregation for multiple judges."""
 
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
 from backend.core.dts.types import AggregatedScore
+
+# -----------------------------------------------------------------------------
+# Aggregation Functions
+# -----------------------------------------------------------------------------
 
 
 def aggregate_majority_vote(
@@ -41,37 +48,3 @@ def aggregate_majority_vote(
         pass_votes=pass_votes,
         passed=passed,
     )
-
-
-def aggregate_mean(scores: list[float]) -> float:
-    """Simple mean aggregation (alternative to median)."""
-    if not scores:
-        return 0.0
-    return sum(scores) / len(scores)
-
-
-def aggregate_with_confidence_weighting(
-    scores: list[float],
-    confidences: list[str],
-) -> float:
-    """
-    Aggregate scores with confidence weighting.
-
-    Judges with higher confidence have more weight.
-
-    Args:
-        scores: List of scores
-        confidences: List of confidence levels ("low", "medium", "high")
-
-    Returns:
-        Weighted average score
-    """
-    if not scores or len(scores) != len(confidences):
-        return aggregate_mean(scores)
-
-    weights = {"low": 1.0, "medium": 2.0, "high": 3.0}
-
-    weighted_sum = sum(s * weights.get(c, 1.0) for s, c in zip(scores, confidences))
-    total_weight = sum(weights.get(c, 1.0) for c in confidences)
-
-    return weighted_sum / total_weight if total_weight > 0 else 0.0

@@ -1,5 +1,12 @@
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 import re
 from typing import Any
+
+# -----------------------------------------------------------------------------
+# Class: PromptService
+# -----------------------------------------------------------------------------
 
 
 class PromptService:
@@ -14,6 +21,8 @@ class PromptService:
             deep_research_context=None
         )
     """
+
+    # --- Generator Prompts ---
 
     USER_INTENT_GENERATOR = """
 <system>
@@ -204,6 +213,8 @@ Num nodes: 5
 </instructions>
 """
 
+    # --- Judge Prompts ---
+
     BRANCH_SELECTION_JUDGE_PROMPT = """
     <system>
     You are an expert evaluator assessing the quality of a conversational branch choice. Your role is to score how promising a particular conversation direction is BEFORE it's explored—like evaluating a chess move based on position, not outcome.
@@ -380,6 +391,14 @@ Your total score should typically land between 4-7. Scores above 8 require excep
 <goal>
 {{conversation_goal}}
 </goal>
+
+{{#if deep_research_context}}
+<deep_research>
+The following research context was available to the system during planning. Use it as background to assess whether the trajectory's choices were sound—but do not penalize for omitting facts unless they were clearly necessary to achieve the goal.
+
+{{deep_research_context}}
+</deep_research>
+{{/if}}
 
 <conversation_history>
 {{conversation_history}}
@@ -566,6 +585,14 @@ You MUST discriminate. The gap between Rank 1 and Rank 2 should be MEANINGFUL, n
 {{conversation_goal}}
 </goal>
 
+{{#if deep_research_context}}
+<deep_research>
+The following research context was available to the system during planning. Use it as background to assess whether trajectories made sound choices—but do not penalize for omitting facts unless clearly necessary.
+
+{{deep_research_context}}
+</deep_research>
+{{/if}}
+
 <trajectories>
 {{#each trajectories}}
 <trajectory id="{{this.id}}" intent="{{this.intent_label}}">
@@ -649,6 +676,8 @@ BEFORE submitting, verify:
 </instructions>
 """.strip()
 
+    # --- Simulator Prompts ---
+
     USER_SIMULATOR_PROMPT = """
 <system>
 You are simulating the user in a conversation. Your job is to embody this user authentically—responding as they would, not as an idealized or cooperative version of them.
@@ -666,10 +695,6 @@ Real users are not cooperative assistants. They push back, get confused, change 
 <goal>
 {{conversation_goal}}
 </goal>
-
-<conversation_history>
-{{conversation_history}}
-</conversation_history>
 
 {{#if user_intent}}
 <assigned_intent>
@@ -729,10 +754,26 @@ Your awareness of the goal varies by context:
 
 Calibrate your goal-directedness accordingly. Not every conversation has a user pushing toward a clear outcome.
 </goal_awareness>
+
+<no_fabrication>
+CRITICAL: Do NOT fabricate information or context that wasn't established:
+- Do NOT invent results, data, or outcomes (e.g., "I ran the code and got error X" when no code was run)
+- Do NOT add false technical details, numbers, or specifics
+- Do NOT pretend to have done something you haven't
+- Do NOT create fictional context or backstory beyond what's in the goal/history
+- If the conversation requires specific information you don't have, ask for it or say you don't know
+- Stay grounded in what has actually been discussed—don't hallucinate prior exchanges
+</no_fabrication>
 </behavioral_guidelines>
 
 <output_format>
 Respond with the next user message only. No meta-commentary, no JSON, no explanation of your choices. Just the raw user message as they would type it.
+
+CRITICAL REQUIREMENTS:
+- Your output MUST be non-empty and contain at least one visible character
+- Do NOT output only whitespace or newlines
+- If the user would be silent or disengaged, express that in words (e.g., "..." or "I don't know" or "hmm" or a brief deflection)
+- Even resistant or confused users say SOMETHING—they don't just disappear
 </output_format>
 
 <calibration_examples>
@@ -782,6 +823,98 @@ Respond with the next user message only. No meta-commentary, no JSON, no explana
 </instructions>
 """.strip()
 
+    REPHRASE_WITH_INTENT_PROMPT = """
+<system>
+You are a message rephraser. Your job is to take an original user message and rephrase it to incorporate a specific emotional tone and cognitive stance, while preserving the core meaning and request.
+</system>
+
+<task>
+Rephrase the user's message to reflect the specified intent. The rephrased message should:
+1. **Preserve the core request**: Keep the essential goal/ask intact
+2. **Incorporate emotional tone**: Add undertones that reflect the emotional state
+3. **Reflect cognitive stance**: Adjust wording to match how the user approaches the topic
+4. **Stay natural**: Sound like something a real person would actually say
+5. **Similar length**: Keep roughly the same length as the original (within 50%)
+</task>
+
+<input_context>
+<original_message>
+{{original_message}}
+</original_message>
+
+<intent>
+<label>{{intent_label}}</label>
+<description>{{intent_description}}</description>
+<emotional_tone>{{emotional_tone}}</emotional_tone>
+<cognitive_stance>{{cognitive_stance}}</cognitive_stance>
+</intent>
+</input_context>
+
+<emotional_tone_guide>
+- **engaged**: Enthusiastic, interested, leaning in
+- **resistant**: Pushback, reluctance, skepticism about the process
+- **confused**: Uncertain, asking for clarification, hesitant
+- **skeptical**: Doubting, questioning, needs convincing
+- **enthusiastic**: Excited, eager, very positive
+- **deflecting**: Avoiding, minimizing, changing subject
+- **anxious**: Worried, nervous, seeking reassurance
+- **neutral**: Balanced, matter-of-fact, no strong emotion
+</emotional_tone_guide>
+
+<cognitive_stance_guide>
+- **accepting**: Open to ideas, willing to try things
+- **questioning**: Probing, wants to understand before proceeding
+- **challenging**: Pushing back, testing, needs to be convinced
+- **exploring**: Open-ended curiosity, discovering
+- **withdrawing**: Pulling back, disengaging, uncertain
+</cognitive_stance_guide>
+
+<output_format>
+Respond with ONLY the rephrased message. No explanation, no quotes, no preamble. Just the raw rephrased user message.
+</output_format>
+
+<calibration_examples>
+<example>
+<original>I want to write a research paper on the Muon optimizer.</original>
+<intent_label>Skeptical researcher</intent_label>
+<emotional_tone>skeptical</emotional_tone>
+<cognitive_stance>challenging</cognitive_stance>
+<rephrased>I'm considering writing a research paper on the Muon optimizer, but I'm not sure there's enough novelty there. Is this actually worth pursuing, or has it already been covered extensively?</rephrased>
+</example>
+
+<example>
+<original>I want to write a research paper on the Muon optimizer.</original>
+<intent_label>Eager student</intent_label>
+<emotional_tone>enthusiastic</emotional_tone>
+<cognitive_stance>accepting</cognitive_stance>
+<rephrased>I'm really excited to write a research paper on the Muon optimizer! I've been reading about it and it seems like such a cool advancement. Where should I start?</rephrased>
+</example>
+
+<example>
+<original>I want to write a research paper on the Muon optimizer.</original>
+<intent_label>Overwhelmed beginner</intent_label>
+<emotional_tone>anxious</emotional_tone>
+<cognitive_stance>questioning</cognitive_stance>
+<rephrased>I need to write a research paper on the Muon optimizer, but honestly I'm feeling a bit overwhelmed. There's so much to understand about optimizers in general—is this topic going to be too complex for me?</rephrased>
+</example>
+
+<example>
+<original>Help me debug a memory leak in my Python application.</original>
+<intent_label>Frustrated developer</intent_label>
+<emotional_tone>resistant</emotional_tone>
+<cognitive_stance>challenging</cognitive_stance>
+<rephrased>I've got a memory leak in my Python app and I've already tried the usual stuff. I really don't want to spend hours on this—is there a quick way to nail down what's causing it?</rephrased>
+</example>
+</calibration_examples>
+
+<instructions>
+1. Read the original message carefully
+2. Understand the intent's emotional tone and cognitive stance
+3. Rephrase to incorporate both while keeping the core request
+4. Output ONLY the rephrased message—nothing else
+</instructions>
+""".strip()
+
     ASSISTANT_CONTINUATION_PROMPT = """
 <system>
 You are the assistant in a conversation, continuing from where the conversation left off. You have been given a strategic direction to follow for your next response. Execute this strategy naturally—the user should experience a coherent conversation, not a strategy being deployed at them.
@@ -797,10 +930,6 @@ Your job is to:
 </task>
 
 <input_context>
-<conversation_history>
-{{conversation_history}}
-</conversation_history>
-
 <strategy>
 <tagline>{{strategy_tagline}}</tagline>
 <description>{{strategy_description}}</description>
@@ -906,6 +1035,8 @@ Respond with the next assistant message only. No meta-commentary, no JSON, no ex
 </instructions>
 """.strip()
 
+    # --- Template Rendering ---
+
     @staticmethod
     def _render(template: str, **variables: Any) -> str:
         """
@@ -937,6 +1068,8 @@ Respond with the next assistant message only. No meta-commentary, no JSON, no ex
         result = var_pattern.sub(replace_var, result)
 
         return result.strip()
+
+    # --- Prompt Methods ---
 
     def conversation_tree_generator(
         self,
@@ -973,17 +1106,18 @@ Respond with the next assistant message only. No meta-commentary, no JSON, no ex
         self,
         conversation_goal: str,
         conversation_history: str,
+        deep_research_context: str | None = None,
     ) -> str:
         return self._render(
             self.TRAJECTORY_OUTCOME_JUDGE_PROMPT,
             conversation_goal=conversation_goal,
             conversation_history=conversation_history,
+            deep_research_context=deep_research_context,
         )
 
     def user_simulation(
         self,
         conversation_goal: str,
-        conversation_history: str,
         user_intent: dict | None = None,
     ) -> str:
         """
@@ -991,13 +1125,13 @@ Respond with the next assistant message only. No meta-commentary, no JSON, no ex
 
         Args:
             conversation_goal: The goal of the conversation.
-            conversation_history: Formatted conversation history.
             user_intent: Optional dict with keys: label, description, emotional_tone, cognitive_stance
+
+        Note: Conversation history is passed as messages, not embedded in the prompt.
         """
         return self._render(
             self.USER_SIMULATOR_PROMPT,
             conversation_goal=conversation_goal,
-            conversation_history=conversation_history,
             user_intent=user_intent is not None,
             user_intent_label=user_intent.get("label", "") if user_intent else "",
             user_intent_description=user_intent.get("description", "")
@@ -1014,14 +1148,17 @@ Respond with the next assistant message only. No meta-commentary, no JSON, no ex
     def assistant_continuation(
         self,
         conversation_goal: str,
-        conversation_history: str,
         strategy_tagline: str,
         strategy_description: str,
     ) -> str:
+        """
+        Render assistant continuation prompt.
+
+        Note: Conversation history is passed as messages, not embedded in the prompt.
+        """
         return self._render(
             self.ASSISTANT_CONTINUATION_PROMPT,
             conversation_goal=conversation_goal,
-            conversation_history=conversation_history,
             strategy_tagline=strategy_tagline,
             strategy_description=strategy_description,
         )
@@ -1040,10 +1177,38 @@ Respond with the next assistant message only. No meta-commentary, no JSON, no ex
             conversation_history=conversation_history,
         )
 
+    def rephrase_with_intent(
+        self,
+        original_message: str,
+        intent_label: str,
+        intent_description: str,
+        emotional_tone: str,
+        cognitive_stance: str,
+    ) -> str:
+        """
+        Generate prompt for rephrasing a user message with a specific intent.
+
+        Args:
+            original_message: The original user message to rephrase.
+            intent_label: Short label for the intent (e.g., "Skeptical researcher").
+            intent_description: Description of the intent.
+            emotional_tone: Emotional tone to incorporate.
+            cognitive_stance: Cognitive stance to reflect.
+        """
+        return self._render(
+            self.REPHRASE_WITH_INTENT_PROMPT,
+            original_message=original_message,
+            intent_label=intent_label,
+            intent_description=intent_description,
+            emotional_tone=emotional_tone,
+            cognitive_stance=cognitive_stance,
+        )
+
     def comparative_trajectory_judge(
         self,
         conversation_goal: str,
         trajectories: list[dict],
+        deep_research_context: str | None = None,
     ) -> str:
         """
         Generate prompt for comparative trajectory judging.
@@ -1051,6 +1216,7 @@ Respond with the next assistant message only. No meta-commentary, no JSON, no ex
         Args:
             conversation_goal: The goal of the conversation.
             trajectories: List of dicts with keys: id, intent_label, history
+            deep_research_context: Optional research context for informed judging.
         """
         # Manually format trajectories since {{#each}} isn't supported
         trajectories_xml = []
@@ -1070,6 +1236,7 @@ Respond with the next assistant message only. No meta-commentary, no JSON, no ex
             template,
             num_trajectories=len(trajectories),
             conversation_goal=conversation_goal,
+            deep_research_context=deep_research_context,
         )
 
 

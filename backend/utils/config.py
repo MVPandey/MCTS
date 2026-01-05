@@ -3,7 +3,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Config(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     openai_base_url: str = Field(
         default="https://openrouter.ai/api/v1",
@@ -19,7 +21,7 @@ class Config(BaseSettings):
         description="API key for OpenRouter API",
     )
 
-    llm_name: str = Field(default="minimax/minimax-m2.1", description="LLM model name")
+    llm_name: str = Field(default="z-ai/glm-4.7", description="LLM model name")
 
     # --- These are for deep researcher ---
     fast_llm: str = Field(
@@ -35,9 +37,18 @@ class Config(BaseSettings):
         description="Strategic LLM model name",
     )
 
-    tavily_api_key: str = Field(
+    firecrawl_api_key: str = Field(
         default="",
-        description="API key for Tavily API",
+        description="API key for Firecrawl API",
+    )
+
+    scraper: str = Field(
+        default="firecrawl",
+        description="Web scraper to use (firecrawl, tavily, etc.)",
+    )
+    max_scraper_workers: int = Field(
+        default=5,
+        description="Maximum concurrent scraper workers for deep research",
     )
 
     embedding_base_url: str = Field(

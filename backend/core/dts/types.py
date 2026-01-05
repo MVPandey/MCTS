@@ -1,14 +1,30 @@
 """Data models for Dialogue Tree Search."""
 
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
+import json
+import logging
+import urllib.request
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from backend.llm.types import Message, Usage
+
+# -----------------------------------------------------------------------------
+# Module Setup
+# -----------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# Pricing Models
+# -----------------------------------------------------------------------------
 
 
 @dataclass
@@ -26,19 +42,55 @@ class ModelPricing:
         return input_cost + output_cost
 
 
-# Common model pricing configurations
-MODEL_PRICING = {
-    "minimax/minimax-m2.1": ModelPricing(
-        model_name="minimax/minimax-m2.1",
-        input_cost_per_million=0.30,
-        output_cost_per_million=1.20,
-    ),
-    "z-ai/glm-4.7": ModelPricing(
-        model_name="z-ai/glm-4.7",
-        input_cost_per_million=0.40,
-        output_cost_per_million=1.50,
-    ),
-}
+# Pricing cache - populated dynamically from OpenRouter API
+_pricing_cache: dict[str, ModelPricing] = {}
+_pricing_loaded: bool = False
+
+
+def _load_pricing_from_openrouter() -> None:
+    """Fetch model pricing from OpenRouter API and cache it."""
+    global _pricing_cache, _pricing_loaded
+    if _pricing_loaded:
+        return
+
+    try:
+        with urllib.request.urlopen(
+            "https://openrouter.ai/api/v1/models", timeout=10
+        ) as response:
+            data = json.loads(response.read().decode())
+
+        for model in data.get("data", []):
+            model_id = model.get("id", "")
+            pricing = model.get("pricing", {})
+
+            # OpenRouter returns price per token, convert to per million
+            prompt_per_token = float(pricing.get("prompt", 0))
+            completion_per_token = float(pricing.get("completion", 0))
+
+            _pricing_cache[model_id] = ModelPricing(
+                model_name=model_id,
+                input_cost_per_million=prompt_per_token * 1_000_000,
+                output_cost_per_million=completion_per_token * 1_000_000,
+            )
+
+        _pricing_loaded = True
+        logger.debug(f"Loaded pricing for {len(_pricing_cache)} models from OpenRouter")
+
+    except Exception as e:
+        logger.warning(f"Failed to load pricing from OpenRouter: {e}")
+        _pricing_loaded = True  # Don't retry on failure
+
+
+def get_model_pricing(model_name: str) -> ModelPricing:
+    """Get pricing for a model, fetching from OpenRouter if needed."""
+    _load_pricing_from_openrouter()
+
+    if model_name in _pricing_cache:
+        return _pricing_cache[model_name]
+
+    # Return zero pricing for unknown models with a warning
+    logger.warning(f"No pricing found for model '{model_name}' - cost will be $0")
+    return ModelPricing(model_name, 0.0, 0.0)
 
 
 @dataclass
@@ -71,10 +123,10 @@ class TokenTracker:
     """
     Tracks token usage and costs across a DTS run.
 
-    Separates usage by phase for detailed analysis.
+    Separates usage by phase and by model for accurate cost calculation.
     """
 
-    model_name: str = "minimax/minimax-m2.1"
+    model_name: str = "unknown"  # Primary model name (for display)
 
     # Per-phase tracking
     strategy_generation: TokenStats = field(default_factory=TokenStats)
@@ -84,15 +136,30 @@ class TokenTracker:
     judging: TokenStats = field(default_factory=TokenStats)
     research: TokenStats = field(default_factory=TokenStats)
 
+    # Per-model tracking for accurate cost calculation
+    by_model: dict[str, TokenStats] = field(default_factory=dict)
+
     # External costs (e.g., GPT Researcher uses its own LLM client)
     research_cost_usd: float = 0.0
 
+    def add_usage(self, model: str, usage: "Usage | None", phase: str) -> None:
+        """Track usage for a specific model and phase."""
+        if not usage:
+            return
+
+        # Track by phase
+        phase_stats = getattr(self, phase.replace("-", "_"), None)
+        if isinstance(phase_stats, TokenStats):
+            phase_stats.add(usage)
+
+        # Track by model for accurate cost calculation
+        if model not in self.by_model:
+            self.by_model[model] = TokenStats()
+        self.by_model[model].add(usage)
+
     def get_pricing(self) -> ModelPricing:
-        """Get pricing for the current model."""
-        return MODEL_PRICING.get(
-            self.model_name,
-            ModelPricing(self.model_name, 0.0, 0.0),  # Unknown model = no cost
-        )
+        """Get pricing for the primary model (fetched from OpenRouter API)."""
+        return get_model_pricing(self.model_name)
 
     @property
     def total_input_tokens(self) -> int:
@@ -137,22 +204,33 @@ class TokenTracker:
 
     @property
     def total_cost(self) -> float:
-        """Total cost in dollars (including external research costs)."""
-        pricing = self.get_pricing()
-        token_cost = pricing.calculate_cost(
-            self.total_input_tokens, self.total_output_tokens
-        )
-        return token_cost + self.research_cost_usd
+        """Total cost in dollars (calculated per-model for accuracy)."""
+        total = 0.0
+        for model_name, stats in self.by_model.items():
+            pricing = get_model_pricing(model_name)
+            total += pricing.calculate_cost(stats.input_tokens, stats.output_tokens)
+        return total + self.research_cost_usd
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
-        pricing = self.get_pricing()
+        # Build per-model breakdown
+        by_model_dict = {}
+        for model_name, stats in self.by_model.items():
+            pricing = get_model_pricing(model_name)
+            cost = pricing.calculate_cost(stats.input_tokens, stats.output_tokens)
+            by_model_dict[model_name] = {
+                "input_tokens": stats.input_tokens,
+                "output_tokens": stats.output_tokens,
+                "requests": stats.request_count,
+                "cost_usd": round(cost, 6),
+                "pricing": {
+                    "input_per_million": pricing.input_cost_per_million,
+                    "output_per_million": pricing.output_cost_per_million,
+                },
+            }
+
         return {
-            "model": self.model_name,
-            "pricing": {
-                "input_per_million": pricing.input_cost_per_million,
-                "output_per_million": pricing.output_cost_per_million,
-            },
+            "models_used": list(self.by_model.keys()),
             "totals": {
                 "input_tokens": self.total_input_tokens,
                 "output_tokens": self.total_output_tokens,
@@ -160,6 +238,7 @@ class TokenTracker:
                 "total_requests": self.total_requests,
                 "total_cost_usd": round(self.total_cost, 6),
             },
+            "by_model": by_model_dict,
             "by_phase": {
                 "strategy_generation": {
                     "input_tokens": self.strategy_generation.input_tokens,
@@ -197,16 +276,16 @@ class TokenTracker:
 
     def print_summary(self) -> None:
         """Print a formatted summary of token usage and costs."""
-        pricing = self.get_pricing()
-
         print("\n" + "=" * 60)
         print("TOKEN USAGE & COST SUMMARY")
         print("=" * 60)
-        print(f"Model: {self.model_name}")
-        print(
-            f"Pricing: ${pricing.input_cost_per_million:.2f}/1M input, "
-            f"${pricing.output_cost_per_million:.2f}/1M output"
-        )
+
+        # Show models used
+        models_used = list(self.by_model.keys())
+        if models_used:
+            print(f"Models: {', '.join(models_used)}")
+        else:
+            print(f"Model: {self.model_name}")
         print("-" * 60)
 
         # Totals
@@ -214,20 +293,25 @@ class TokenTracker:
         print(f"{'Total Output Tokens:':<30} {self.total_output_tokens:>15,}")
         print(f"{'Total Tokens:':<30} {self.total_tokens:>15,}")
         print(f"{'Total Requests:':<30} {self.total_requests:>15}")
-        print("-" * 60)
-
-        # Cost breakdown
-        input_cost = (
-            self.total_input_tokens / 1_000_000
-        ) * pricing.input_cost_per_million
-        output_cost = (
-            self.total_output_tokens / 1_000_000
-        ) * pricing.output_cost_per_million
-
-        print(f"{'Input Cost:':<30} ${input_cost:>14.6f}")
-        print(f"{'Output Cost:':<30} ${output_cost:>14.6f}")
         print(f"{'TOTAL COST:':<30} ${self.total_cost:>14.6f}")
         print("-" * 60)
+
+        # Per-model breakdown
+        if self.by_model:
+            print("\nBy Model:")
+            for model_name, stats in self.by_model.items():
+                pricing = get_model_pricing(model_name)
+                model_cost = pricing.calculate_cost(
+                    stats.input_tokens, stats.output_tokens
+                )
+                print(
+                    f"  {model_name:<35} | {stats.request_count:>4} reqs | "
+                    f"${model_cost:.4f}"
+                )
+                print(
+                    f"    Pricing: ${pricing.input_cost_per_million:.2f}/1M in, "
+                    f"${pricing.output_cost_per_million:.2f}/1M out"
+                )
 
         # Per-phase breakdown
         print("\nBy Phase:")
@@ -241,13 +325,9 @@ class TokenTracker:
         ]
         for name, stats in phases:
             if stats.request_count > 0:
-                phase_cost = pricing.calculate_cost(
-                    stats.input_tokens, stats.output_tokens
-                )
                 print(
                     f"  {name:<22} | {stats.request_count:>4} reqs | "
-                    f"{stats.input_tokens:>8,} in | {stats.output_tokens:>8,} out | "
-                    f"${phase_cost:.4f}"
+                    f"{stats.input_tokens:>8,} in | {stats.output_tokens:>8,} out"
                 )
 
         # External research cost (GPT Researcher uses its own LLM)
@@ -260,6 +340,11 @@ class TokenTracker:
         print("=" * 60)
 
 
+# -----------------------------------------------------------------------------
+# Enums
+# -----------------------------------------------------------------------------
+
+
 class NodeStatus(str, Enum):
     """Status of a tree node."""
 
@@ -267,6 +352,11 @@ class NodeStatus(str, Enum):
     PRUNED = "pruned"
     TERMINAL = "terminal"
     ERROR = "error"
+
+
+# -----------------------------------------------------------------------------
+# Strategy & Intent Models
+# -----------------------------------------------------------------------------
 
 
 class Strategy(BaseModel):
@@ -284,6 +374,11 @@ class UserIntent(BaseModel):
     description: str
     emotional_tone: str  # engaged, resistant, confused, skeptical, enthusiastic, deflecting, anxious, neutral
     cognitive_stance: str  # accepting, questioning, challenging, exploring, withdrawing
+
+
+# -----------------------------------------------------------------------------
+# Evaluation Models
+# -----------------------------------------------------------------------------
 
 
 class CriterionScore(BaseModel):
@@ -321,6 +416,22 @@ class AggregatedScore(BaseModel):
     pass_votes: int = Field(ge=0, le=3)  # count of scores >= threshold
     passed: bool  # True if pass_votes >= 2
 
+    @classmethod
+    def zero(cls, threshold: float = 5.0) -> "AggregatedScore":
+        """Create a zero score for error/fallback cases."""
+        return cls(
+            individual_scores=[0.0, 0.0, 0.0],
+            aggregated_score=0.0,
+            pass_threshold=threshold,
+            pass_votes=0,
+            passed=False,
+        )
+
+
+# -----------------------------------------------------------------------------
+# Node Models
+# -----------------------------------------------------------------------------
+
 
 class NodeStats(BaseModel):
     """Statistics for a dialogue node."""
@@ -330,6 +441,10 @@ class NodeStats(BaseModel):
     value_mean: float = 0.0
     judge_scores: list[float] = Field(default_factory=list)
     aggregated_score: float = 0.0
+    # Critique from comparative judging
+    critiques: dict[str, list[str] | str] = Field(
+        default_factory=dict
+    )  # {weaknesses: [], strengths: [], key_moment: ""}
 
 
 class DialogueNode(BaseModel):
@@ -358,6 +473,20 @@ class DialogueNode(BaseModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
+    def update_with_evaluation(
+        self, score: AggregatedScore, critiques: dict | None = None
+    ) -> None:
+        """Update node stats with evaluation results."""
+        self.stats.judge_scores = score.individual_scores
+        self.stats.aggregated_score = score.aggregated_score
+        if critiques:
+            self.stats.critiques = critiques
+
+
+# -----------------------------------------------------------------------------
+# Output Models
+# -----------------------------------------------------------------------------
+
 
 class TreeGeneratorOutput(BaseModel):
     """Parsed output from conversation_tree_generator prompt."""
@@ -376,6 +505,9 @@ class DTSRunResult(BaseModel):
     all_nodes: list[DialogueNode] = Field(default_factory=list)
     pruned_count: int = 0
     total_rounds: int = 0
+
+    # Deep research report if generated
+    research_report: str | None = None
 
     # Token usage tracking (populated after run)
     token_usage: dict | None = None
@@ -433,6 +565,7 @@ class DTSRunResult(BaseModel):
                     "aggregated": node.stats.aggregated_score,
                     "visits": node.stats.visits,
                     "value_mean": node.stats.value_mean,
+                    "critiques": node.stats.critiques if node.stats.critiques else None,
                 },
                 "trajectory": [
                     {"role": msg.role, "content": msg.content} for msg in node.messages
@@ -472,6 +605,7 @@ class DTSRunResult(BaseModel):
                 "total_rounds": self.total_rounds,
                 "best_score": self.best_score,
             },
+            "research_report": self.research_report,
             "best_branch": best_branch,
             "branches": branches,
         }
@@ -484,13 +618,9 @@ class DTSRunResult(BaseModel):
 
     def to_json(self, indent: int = 2) -> str:
         """Convert to formatted JSON string for exploration."""
-        import json
-
         return json.dumps(self.to_exploration_dict(), indent=indent, ensure_ascii=False)
 
     def save_json(self, path: str) -> None:
         """Save exploration data to a JSON file."""
-        from pathlib import Path
-
         Path(path).write_text(self.to_json(), encoding="utf-8")
-        print(f"[DTS:SAVE] Results saved to {path}")
+        logger.info(f"Results saved to {path}")
