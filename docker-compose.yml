@@ -1,0 +1,60 @@
+# -----------------------------------------------------------------------------
+# DTS (Dialogue Tree Search) Docker Compose Configuration
+# -----------------------------------------------------------------------------
+# Usage:
+#   docker-compose up -d        # Start in background
+#   docker-compose up           # Start with logs
+#   docker-compose down         # Stop and remove containers
+#   docker-compose logs -f      # Follow logs
+# -----------------------------------------------------------------------------
+
+services:
+  dts-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dts-server
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+    volumes:
+      # Mount cache directory for research persistence
+      - ./.cache:/app/.cache
+      # Mount frontend for development (optional)
+      - ./frontend:/app/frontend:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Development mode with hot reload
+  dts-server-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dts-server-dev
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      - DEBUG=true
+    volumes:
+      # Mount source code for hot reload
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+      - ./.cache:/app/.cache
+    command: ["uvicorn", "backend.api.server:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--log-level", "debug"]
+    profiles:
+      - dev

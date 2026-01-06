@@ -323,7 +323,110 @@ STRATEGIC_LLM=openrouter:minimax/minimax-m2.1
 
 ## Quick Start
 
-### Option 1: Python Script (Headless)
+### Option 1: Using Start Scripts (Recommended)
+
+The easiest way to start the server:
+
+**Unix/macOS/Linux:**
+```bash
+# Start with Docker
+./scripts/start_server.sh
+
+# Start in development mode (hot reload)
+./scripts/start_server.sh --dev
+
+# Start without Docker (local Python)
+./scripts/start_server.sh --local
+
+# Stop the server
+./scripts/start_server.sh --down
+```
+
+**Windows:**
+```cmd
+REM Start with Docker
+scripts\start_server.bat
+
+REM Start in development mode (hot reload)
+scripts\start_server.bat --dev
+
+REM Start without Docker (local Python)
+scripts\start_server.bat --local
+
+REM Stop the server
+scripts\start_server.bat --down
+```
+
+### Option 2: Using Docker Compose Directly
+
+```bash
+# Start the server (production)
+docker-compose up -d dts-server
+
+# Start in development mode with hot reload
+docker-compose --profile dev up dts-server-dev
+
+# View logs
+docker-compose logs -f
+
+# Stop and remove containers
+docker-compose down
+
+# Rebuild after code changes
+docker-compose up -d --build dts-server
+```
+
+### Option 3: Manual Uvicorn Start
+
+```bash
+# Activate virtual environment
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# Set PYTHONPATH
+export PYTHONPATH=$(pwd)  # Windows: set PYTHONPATH=%cd%
+
+# Start server
+uvicorn backend.api.server:app --host localhost --port 8000 --reload --log-level info
+```
+
+### Option 4: VSCode Debugger
+
+The project includes VSCode launch configurations for debugging:
+
+1. Open the project in VSCode
+2. Go to **Run and Debug** (Ctrl+Shift+D / Cmd+Shift+D)
+3. Select a configuration from the dropdown:
+
+| Configuration | Description |
+|:--------------|:------------|
+| **Debug DTS Server** | Start the API server with debugger attached |
+| **Debug Current Python File** | Debug the currently open file |
+| **Attach to Remote Debugpy** | Attach to a running debugpy server (port 5678) |
+
+4. Press F5 or click the green play button
+
+**VSCode Launch Configuration** (`.vscode/launch.json`):
+```json
+{
+  "name": "Debug DTS Server",
+  "type": "debugpy",
+  "request": "launch",
+  "module": "uvicorn",
+  "args": [
+    "backend.api.server:app",
+    "--host", "localhost",
+    "--port", "8000",
+    "--reload",
+    "--log-level", "info"
+  ],
+  "env": { "PYTHONPATH": "${workspaceFolder}" },
+  "envFile": "${workspaceFolder}/.env"
+}
+```
+
+### Option 5: Python Script (Headless)
+
+For programmatic use without the web interface:
 
 ```python
 import asyncio
@@ -373,15 +476,16 @@ Or run the included example:
 python main.py
 ```
 
-### Option 2: Web Visualizer (Recommended)
+### Accessing the Application
 
-Start the FastAPI server:
+Once the server is running:
 
-```bash
-uvicorn backend.api.server:app --host localhost --port 8000 --reload
-```
-
-Open `frontend/index.html` in your browser, configure your search, and watch the tree expand in real-time.
+| Resource | URL |
+|:---------|:----|
+| **API** | http://localhost:8000 |
+| **API Docs (Swagger)** | http://localhost:8000/docs |
+| **API Docs (ReDoc)** | http://localhost:8000/redoc |
+| **Frontend** | Open `frontend/index.html` in your browser |
 
 ---
 
@@ -578,7 +682,14 @@ DTS/
 ├── frontend/
 │   ├── index.html             # Single-page visualizer
 │   └── app.js                 # WebSocket client & UI logic
+├── scripts/
+│   ├── start_server.sh        # Unix/macOS start script
+│   └── start_server.bat       # Windows start script
 ├── gpt-researcher/            # GPT-Researcher submodule
+├── .vscode/
+│   └── launch.json            # VSCode debug configurations
+├── Dockerfile                 # Container image definition
+├── docker-compose.yml         # Multi-container orchestration
 ├── main.py                    # Example script
 ├── pyproject.toml             # Project metadata & dependencies
 ├── CLAUDE.md                  # Developer instructions
