@@ -27,12 +27,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
-# Constants
-# -----------------------------------------------------------------------------
-# Global semaphore to limit concurrent research requests
-_research_semaphore = asyncio.Semaphore(5)
-
-# -----------------------------------------------------------------------------
 # Type Aliases
 # -----------------------------------------------------------------------------
 EventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -61,6 +55,7 @@ Write a single sentence research query that will help gather relevant domain kno
         llm: LLM,
         model: str | None = None,
         cache_dir: str = ".cache/research",
+        max_concurrent_research: int = 5,
         on_cost: Callable[[float], None] | None = None,
         on_event: EventCallback | None = None,
     ) -> None:
@@ -71,6 +66,7 @@ Write a single sentence research query that will help gather relevant domain kno
             llm: LLM client for query generation.
             model: Model to use for query distillation.
             cache_dir: Directory for caching research results.
+            max_concurrent_research: Maximum concurrent research requests.
             on_cost: Callback for tracking external USD costs.
             on_event: Async callback for emitting events to UI.
         """
@@ -78,6 +74,7 @@ Write a single sentence research query that will help gather relevant domain kno
         self.model = model
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._sem = asyncio.Semaphore(max_concurrent_research)
         self._on_cost = on_cost
         self._on_event = on_event
 
@@ -109,7 +106,7 @@ Write a single sentence research query that will help gather relevant domain kno
         cached = self._load_cache(cache_key)
         if cached:
             log_phase(logger, "RESEARCH", f"Cache hit: {cache_key[:8]}...", indent=1)
-            await self._emit(
+            self._emit(
                 "research_log",
                 {"message": "Using cached research results", "type": "cache_hit"},
             )
@@ -120,7 +117,7 @@ Write a single sentence research query that will help gather relevant domain kno
         self._setup_environment()
 
         # Generate research query via LLM
-        await self._emit(
+        self._emit(
             "research_log",
             {"message": "Generating research query...", "type": "progress"},
         )
@@ -137,7 +134,7 @@ Write a single sentence research query that will help gather relevant domain kno
                 f"Starting deep research for: {goal[:50]}...",
                 indent=1,
             )
-            await self._emit(
+            self._emit(
                 "research_log",
                 {"message": f"Researching: {goal[:80]}...", "type": "start"},
             )
@@ -147,10 +144,10 @@ Write a single sentence research query that will help gather relevant domain kno
                 report_type=report_type,
             )
 
-            # Rate limit concurrent research requests (max 5)
-            async with _research_semaphore:
+            # Rate limit concurrent research requests
+            async with self._sem:
                 # Conduct research with progress updates
-                await self._emit(
+                self._emit(
                     "research_log",
                     {
                         "message": "Searching for relevant sources...",
@@ -159,7 +156,7 @@ Write a single sentence research query that will help gather relevant domain kno
                 )
                 await researcher.conduct_research()
 
-                await self._emit(
+                self._emit(
                     "research_log",
                     {"message": "Writing research report...", "type": "progress"},
                 )
@@ -179,7 +176,7 @@ Write a single sentence research query that will help gather relevant domain kno
                 f"Research complete, cached as {cache_key[:8]}...",
                 indent=1,
             )
-            await self._emit(
+            self._emit(
                 "research_log",
                 {"message": "Research complete", "type": "complete"},
             )
@@ -193,9 +190,10 @@ Write a single sentence research query that will help gather relevant domain kno
 
     # --- Private Methods ---
 
-    async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
-        """Emit an event if callback is set."""
-        await emit_event(self._on_event, event_type, data, logger)
+    def _emit(self, event_type: str, data: dict[str, Any]) -> None:
+        """Emit an event if callback is set (fire-and-forget)."""
+        if self._on_event is not None:
+            asyncio.create_task(emit_event(self._on_event, event_type, data, logger))
 
     def _setup_environment(self) -> None:
         """

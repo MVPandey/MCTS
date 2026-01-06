@@ -1,5 +1,6 @@
-from pydantic import Field, PostgresDsn
+from pydantic import Field, PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Self
 
 
 class Config(BaseSettings):
@@ -17,9 +18,30 @@ class Config(BaseSettings):
     )
 
     openrouter_api_key: str = Field(
-        default=openai_api_key,
+        default="",
         description="API key for OpenRouter API",
     )
+
+    # LLM client settings
+    llm_timeout: float = Field(
+        default=60.0,
+        description="Request timeout in seconds for LLM calls",
+    )
+    llm_max_retries: int = Field(
+        default=2,
+        description="Maximum retries for failed LLM requests",
+    )
+    max_concurrency: int = Field(
+        default=16,
+        description="Maximum concurrent LLM calls",
+    )
+
+    @model_validator(mode="after")
+    def set_openrouter_fallback(self) -> Self:
+        """Fall back to openai_api_key if openrouter_api_key is not set."""
+        if not self.openrouter_api_key:
+            self.openrouter_api_key = self.openai_api_key
+        return self
 
     llm_name: str = Field(default="z-ai/glm-4.7", description="LLM model name")
 

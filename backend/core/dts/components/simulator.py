@@ -178,7 +178,7 @@ class ConversationSimulator:
                     indent=2,
                 )
                 # Emit intent_generated event for UI
-                await self._emit(
+                self._emit(
                     "intent_generated",
                     {
                         "strategy": strategy_name,
@@ -217,13 +217,12 @@ class ConversationSimulator:
         expanded = []
         completed = 0
         failed = 0
-        timeout_per_task = 120.0
+        # Total timeout scales with task count (2 minutes per task)
+        total_timeout = 120.0 * max(1, len(expansion_tasks))
 
-        for coro in asyncio.as_completed(
-            expansion_tasks, timeout=timeout_per_task * len(expansion_tasks)
-        ):
+        for coro in asyncio.as_completed(expansion_tasks, timeout=total_timeout):
             try:
-                result = await asyncio.wait_for(coro, timeout=timeout_per_task)
+                result = await coro
                 if isinstance(result, DialogueNode):
                     expanded.append(result)
                     completed += 1
@@ -493,9 +492,10 @@ class ConversationSimulator:
 
         return False
 
-    async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
-        """Emit an event if callback is set."""
-        await emit_event(self._on_event, event_type, data, logger)
+    def _emit(self, event_type: str, data: dict[str, Any]) -> None:
+        """Emit an event if callback is set (fire-and-forget)."""
+        if self._on_event is not None:
+            asyncio.create_task(emit_event(self._on_event, event_type, data, logger))
 
     async def _call_llm(
         self, messages: list[Message], phase: str = "other"

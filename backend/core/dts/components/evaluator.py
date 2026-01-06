@@ -10,6 +10,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable
 
 from backend.core.dts.aggregator import aggregate_majority_vote
+from backend.core.dts.retry import llm_retry
 from backend.core.dts.types import AggregatedScore, DialogueNode
 from backend.core.dts.utils import format_message_history, log_phase
 from backend.core.prompts import prompts
@@ -358,33 +359,20 @@ class TrajectoryEvaluator:
 
         return scores_by_id
 
-    async def _call_llm_json(
-        self, prompt: str, max_retries: int = 3
-    ) -> dict[str, Any] | None:
-        """Make an LLM call expecting JSON output with retry logic."""
+    async def _call_llm_json(self, prompt: str) -> dict[str, Any] | None:
+        """Make an LLM call expecting JSON output with retry."""
         async with self._sem:
-            for attempt in range(max_retries):
-                try:
-                    completion = await self.llm.complete(
-                        [Message.user(prompt)],
-                        model=self.model,
-                        temperature=self.judge_temperature,
-                        structured_output=True,
-                    )
-                    if self._on_usage:
-                        self._on_usage(completion, "judge")
-                    if completion.data:
-                        return completion.data
-                    # Empty data, retry
-                    logger.warning(
-                        f"Empty JSON response (attempt {attempt + 1}/{max_retries})"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"JSON LLM call failed (attempt {attempt + 1}/{max_retries}): {e}"
-                    )
-                    if attempt == max_retries - 1:
-                        logger.error(
-                            f"JSON LLM call failed after {max_retries} retries"
-                        )
-            return None
+            return await self._call_llm_json_inner(prompt)
+
+    @llm_retry(max_attempts=3)
+    async def _call_llm_json_inner(self, prompt: str) -> dict[str, Any] | None:
+        """Inner LLM call with retry logic."""
+        completion = await self.llm.complete(
+            [Message.user(prompt)],
+            model=self.model,
+            temperature=self.judge_temperature,
+            structured_output=True,
+        )
+        if self._on_usage:
+            self._on_usage(completion, "judge")
+        return completion.data

@@ -5,6 +5,7 @@
 # -----------------------------------------------------------------------------
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Callable, Awaitable
 
@@ -177,7 +178,7 @@ class DTSEngine:
         log_phase(logger, "INIT", f"Scoring mode: {cfg.scoring_mode}")
 
         # Emit search started event
-        await self._emit(
+        self._emit(
             "search_started",
             {
                 "goal": cfg.goal,
@@ -195,7 +196,7 @@ class DTSEngine:
 
         # Initialize tree
         log_phase(logger, "INIT", "Creating tree structure...")
-        await self._emit(
+        self._emit(
             "phase", {"phase": "initializing", "message": "Creating tree structure..."}
         )
         tree = await self._initialize_tree()
@@ -209,7 +210,7 @@ class DTSEngine:
             logger.info("-" * 40)
 
             # Emit round started event
-            await self._emit(
+            self._emit(
                 "round_started",
                 {"round": round_num + 1, "total_rounds": rounds},
             )
@@ -232,7 +233,7 @@ class DTSEngine:
                     "INTENT",
                     f"Generating {cfg.user_intents_per_branch} user intents per branch...",
                 )
-                await self._emit(
+                self._emit(
                     "phase",
                     {
                         "phase": "generating_intents",
@@ -248,7 +249,7 @@ class DTSEngine:
                 "EXPAND",
                 f"Expanding {len(expandable)} branches ({cfg.turns_per_branch} turns)...",
             )
-            await self._emit(
+            self._emit(
                 "phase",
                 {
                     "phase": "expanding",
@@ -270,7 +271,7 @@ class DTSEngine:
 
             # Emit node_added events for expanded nodes
             for node in expanded:
-                await self._emit(
+                self._emit(
                     "node_added",
                     {
                         "id": node.id,
@@ -286,7 +287,7 @@ class DTSEngine:
                 )
 
             # Score branches
-            await self._emit(
+            self._emit(
                 "phase",
                 {
                     "phase": "scoring",
@@ -323,7 +324,7 @@ class DTSEngine:
                         indent=1,
                     )
                     # Emit score update
-                    await self._emit(
+                    self._emit(
                         "node_updated",
                         {
                             "id": node.id,
@@ -341,7 +342,7 @@ class DTSEngine:
 
             # Prune
             log_phase(logger, "PRUNE", f"Pruning (threshold: {cfg.prune_threshold})...")
-            await self._emit(
+            self._emit(
                 "phase",
                 {
                     "phase": "pruning",
@@ -362,7 +363,7 @@ class DTSEngine:
             # Emit pruning event
             pruned_nodes = [n for n in expanded if n.status == NodeStatus.PRUNED]
             if pruned_nodes:
-                await self._emit(
+                self._emit(
                     "nodes_pruned",
                     {
                         "ids": [n.id for n in pruned_nodes],
@@ -371,7 +372,7 @@ class DTSEngine:
                 )
 
             # Emit token update
-            await self._emit(
+            self._emit(
                 "token_update",
                 {
                     "totals": {
@@ -404,7 +405,7 @@ class DTSEngine:
         self._token_tracker.print_summary()
 
         # Emit completion event
-        await self._emit(
+        self._emit(
             "phase",
             {
                 "phase": "complete",
@@ -429,9 +430,12 @@ class DTSEngine:
 
     # --- Private Methods ---
 
-    async def _emit(self, event_type: str, data: dict) -> None:
-        """Emit an event if callback is set."""
-        await emit_event(self._event_callback, event_type, data, logger)
+    def _emit(self, event_type: str, data: dict) -> None:
+        """Emit an event if callback is set (fire-and-forget)."""
+        if self._event_callback is not None:
+            asyncio.create_task(
+                emit_event(self._event_callback, event_type, data, logger)
+            )
 
     async def _initialize_tree(self) -> DialogueTree:
         """Initialize tree with root and initial strategy branches."""
@@ -448,7 +452,7 @@ class DTSEngine:
         # Deep research if enabled
         if cfg.deep_research:
             log_phase(logger, "INIT", "Conducting deep research...", indent=1)
-            await self._emit(
+            self._emit(
                 "phase",
                 {
                     "phase": "researching",
@@ -463,7 +467,7 @@ class DTSEngine:
 
         # Generate strategies
         log_phase(logger, "INIT", "Generating strategies...", indent=1)
-        await self._emit(
+        self._emit(
             "phase",
             {
                 "phase": "generating_strategies",
@@ -480,7 +484,7 @@ class DTSEngine:
 
         for i, strategy in enumerate(strategies, 1):
             log_phase(logger, "INIT", f"{i}. {strategy.tagline}", indent=2)
-            await self._emit(
+            self._emit(
                 "strategy_generated",
                 {
                     "index": i,

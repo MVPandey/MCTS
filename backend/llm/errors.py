@@ -49,3 +49,21 @@ class JSONParseError(LLMError):
     """Response content could not be parsed as valid JSON."""
 
     pass
+
+
+class ServerError(LLMError):
+    """5xx server errors (retryable)."""
+
+    pass
+
+
+class TimeoutError(LLMError):
+    """Request timeout (retryable)."""
+
+    pass
+
+
+class ConnectionError(LLMError):
+    """Connection failed (retryable)."""
+
+    pass

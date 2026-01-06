@@ -9,6 +9,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Callable
 
+from backend.core.dts.retry import llm_retry
 from backend.core.dts.types import Strategy, UserIntent
 from backend.core.dts.utils import format_message_history
 from backend.core.prompts import prompts
@@ -89,8 +90,7 @@ class StrategyGenerator:
         result = await self._call_llm_json(prompt, phase="strategy")
 
         if not result:
-            logger.error("Failed to generate strategies")
-            return []
+            raise RuntimeError("Strategy generation failed after retries")
 
         strategies = []
         nodes_data = result.get("nodes", {})
@@ -124,8 +124,7 @@ class StrategyGenerator:
         result = await self._call_llm_json(prompt, phase="intent")
 
         if not result:
-            logger.warning("Failed to generate intents")
-            return []
+            raise RuntimeError("Intent generation failed after retries")
 
         intents = []
         intents_data = result.get("intents", [])
@@ -151,18 +150,21 @@ class StrategyGenerator:
     async def _call_llm_json(
         self, prompt: str, phase: str = "other"
     ) -> dict[str, Any] | None:
-        """Make an LLM call expecting JSON output."""
+        """Make an LLM call expecting JSON output with retry."""
         async with self._sem:
-            try:
-                completion = await self.llm.complete(
-                    [Message.user(prompt)],
-                    model=self.model,
-                    temperature=self.temperature,
-                    structured_output=True,
-                )
-                if self._on_usage:
-                    self._on_usage(completion, phase)
-                return completion.data
-            except Exception as e:
-                logger.error(f"JSON LLM call failed: {e}")
-                return None
+            return await self._call_llm_json_inner(prompt, phase)
+
+    @llm_retry(max_attempts=3)
+    async def _call_llm_json_inner(
+        self, prompt: str, phase: str
+    ) -> dict[str, Any] | None:
+        """Inner LLM call with retry logic."""
+        completion = await self.llm.complete(
+            [Message.user(prompt)],
+            model=self.model,
+            temperature=self.temperature,
+            structured_output=True,
+        )
+        if self._on_usage:
+            self._on_usage(completion, phase)
+        return completion.data

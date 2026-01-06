@@ -18,6 +18,7 @@ from .errors import (
     LLMError,
     ModelNotFoundError,
     RateLimitError,
+    ServerError,
 )
 from .tools import Tool, ToolRegistry
 from .types import Completion, Function, Message, ToolCall, Usage
@@ -47,8 +48,8 @@ class LLM:
         api_key: str,
         base_url: str = config.openai_base_url,
         model: str | None = None,
-        timeout: float = 60.0,
-        max_retries: int = 2,
+        timeout: float = config.llm_timeout,
+        max_retries: int = config.llm_max_retries,
     ):
         """
         Initialize the LLM client.
@@ -385,5 +386,9 @@ class LLM:
             if "content_filter" in message.lower() or "safety" in message.lower():
                 return ContentFilterError(message, status)
             return InvalidRequestError(message, status)
+
+        # 5xx server errors are retryable
+        if status and 500 <= status < 600:
+            return ServerError(message, status)
 
         return LLMError(message, status)
