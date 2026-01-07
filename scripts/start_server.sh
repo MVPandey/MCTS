@@ -36,8 +36,9 @@ print_help() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --dev       Start in development mode with hot reload"
+    echo "  --dev       Start in development mode with hot reload (Docker)"
     echo "  --local     Start without Docker (uses local Python environment)"
+    echo "  --frontend  Start React frontend dev server (with HMR on :3000)"
     echo "  --build     Force rebuild Docker image before starting"
     echo "  --down      Stop and remove containers"
     echo "  --logs      Show container logs"
@@ -45,8 +46,9 @@ print_help() {
     echo ""
     echo "Examples:"
     echo "  $0                 # Start production server"
-    echo "  $0 --dev           # Start with hot reload"
+    echo "  $0 --dev           # Start with hot reload (Docker)"
     echo "  $0 --local         # Run without Docker"
+    echo "  $0 --frontend      # Start React dev server (run with --local in another terminal)"
     echo "  $0 --build         # Rebuild and start"
     echo ""
 }
@@ -107,6 +109,12 @@ start_local() {
         echo -e "${YELLOW}Warning: .venv not found. Using system Python.${NC}"
     fi
 
+    # Build frontend if not already built
+    if [ ! -d "frontend/dist" ]; then
+        echo -e "${YELLOW}Building frontend...${NC}"
+        cd frontend && npm install && npm run build && cd ..
+    fi
+
     # Set PYTHONPATH
     export PYTHONPATH="$PROJECT_ROOT"
 
@@ -116,6 +124,11 @@ start_local() {
         --port 8000 \
         --reload \
         --log-level info
+}
+
+start_frontend_dev() {
+    echo -e "${GREEN}Starting frontend dev server...${NC}"
+    cd frontend && npm run dev
 }
 
 stop_docker() {
@@ -142,6 +155,9 @@ case "${1:-}" in
         ;;
     --local)
         start_local
+        ;;
+    --frontend)
+        start_frontend_dev
         ;;
     --build)
         check_docker

@@ -73,6 +73,24 @@ class Config(BaseSettings):
         description="Maximum concurrent scraper workers for deep research",
     )
 
+    # Deep research parameters
+    deep_research_breadth: int = Field(
+        default=6,
+        description="Number of parallel research queries per depth level",
+    )
+    deep_research_depth: int = Field(
+        default=4,
+        description="Maximum depth of research tree exploration",
+    )
+    deep_research_concurrency: int = Field(
+        default=4,
+        description="Maximum concurrent research tasks",
+    )
+    total_words: int = Field(
+        default=5000,
+        description="Target word count for research report",
+    )
+
     embedding_base_url: str = Field(
         default="https://openrouter.ai/api/v1", description="Base URL for embedding API"
     )

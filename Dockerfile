@@ -2,7 +2,25 @@
 
 # -----------------------------------------------------------------------------
 # DTS (Dialogue Tree Search) Server
+# Multi-stage build: Build React frontend, then Python backend
 # -----------------------------------------------------------------------------
+
+# Stage 1: Build React frontend
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /app/frontend
+
+# Copy package files
+COPY frontend/package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy source and build
+COPY frontend/ ./
+RUN npm run build
+
+# Stage 2: Python backend with built frontend
 FROM python:3.11-slim
 
 # Set environment variables
@@ -32,8 +50,11 @@ RUN uv pip install --system -e .
 
 # Copy application code
 COPY backend/ ./backend/
-COPY frontend/ ./frontend/
 COPY main.py ./
+
+# Copy built frontend from stage 1
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+COPY --from=frontend-builder /app/frontend/public ./frontend/public
 
 # Expose port
 EXPOSE 8000

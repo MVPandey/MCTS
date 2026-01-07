@@ -142,6 +142,7 @@ Write a single sentence research query that will help gather relevant domain kno
             researcher = GPTResearcher(
                 query=query,
                 report_type=report_type,
+                max_sources=10,
             )
 
             # Rate limit concurrent research requests
@@ -233,6 +234,12 @@ Write a single sentence research query that will help gather relevant domain kno
             os.environ["EMBEDDING_API_KEY"] = config.embedding_api_key
         if config.embedding_model_name:
             os.environ["EMBEDDING_MODEL"] = config.embedding_model_name
+
+        # Deep research parameters
+        os.environ["BREADTH"] = str(config.deep_research_breadth)
+        os.environ["DEPTH"] = str(config.deep_research_depth)
+        os.environ["CONCURRENCY"] = str(config.deep_research_concurrency)
+        os.environ["TOTAL_WORDS"] = str(config.total_words)
 
         logger.debug("Environment setup complete")
 

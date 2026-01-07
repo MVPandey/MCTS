@@ -449,6 +449,20 @@ class DTSEngine:
         )
         tree = DialogueTree.create(root)
 
+        # Emit root node
+        self._emit(
+            "node_added",
+            {
+                "id": root.id,
+                "parent_id": None,
+                "depth": 0,
+                "status": root.status.value,
+                "strategy": None,
+                "user_intent": None,
+                "message_count": len(root.messages),
+            },
+        )
+
         # Deep research if enabled
         if cfg.deep_research:
             log_phase(logger, "INIT", "Conducting deep research...", indent=1)
@@ -502,6 +516,19 @@ class DTSEngine:
                 messages=[Message.user(cfg.first_message)],
             )
             tree.add_child(root.id, child)
+            # Emit node_added for initial strategy branches
+            self._emit(
+                "node_added",
+                {
+                    "id": child.id,
+                    "parent_id": root.id,
+                    "depth": child.depth,
+                    "status": child.status.value,
+                    "strategy": child.strategy.tagline if child.strategy else None,
+                    "user_intent": None,
+                    "message_count": len(child.messages),
+                },
+            )
 
         log_phase(
             logger,

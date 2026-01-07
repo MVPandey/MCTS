@@ -108,26 +108,43 @@ async def handle_search(websocket: WebSocket, config_data: dict[str, Any]) -> No
         )
 
 
-# Frontend static files
+# Frontend static files - check for React build first, then fallback to vanilla
 FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend"
+FRONTEND_DIST_DIR = FRONTEND_DIR / "dist"
 
 
 @app.get("/")
 async def serve_index() -> FileResponse:
-    """Serve the main index.html."""
+    """Serve the main index.html (React build or vanilla fallback)."""
+    from fastapi.responses import JSONResponse
+
+    # Check React build first
+    if FRONTEND_DIST_DIR.exists():
+        index_path = FRONTEND_DIST_DIR / "index.html"
+        if index_path.exists():
+            return FileResponse(index_path)
+
+    # Fallback to vanilla frontend
     index_path = FRONTEND_DIR / "index.html"
-    if not index_path.exists():
-        from fastapi.responses import JSONResponse
+    if index_path.exists():
+        return FileResponse(index_path)
 
-        return JSONResponse(  # type: ignore
-            {"error": "Frontend not found. Run from project root."},
-            status_code=404,
-        )
-    return FileResponse(index_path)
+    return JSONResponse(  # type: ignore
+        {"error": "Frontend not found. Run 'npm run build' in frontend/ directory."},
+        status_code=404,
+    )
 
 
-# Mount static files if frontend directory exists
-if FRONTEND_DIR.exists():
+# Mount static files - React build assets or vanilla frontend
+if FRONTEND_DIST_DIR.exists():
+    # React build: mount assets folder
+    assets_dir = FRONTEND_DIST_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+    # Also serve other static files from dist (like favicon)
+    app.mount("/static", StaticFiles(directory=FRONTEND_DIST_DIR), name="static")
+elif FRONTEND_DIR.exists():
+    # Vanilla fallback
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 
