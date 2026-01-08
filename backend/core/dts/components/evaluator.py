@@ -47,6 +47,8 @@ class TrajectoryEvaluator:
         max_concurrency: int = 16,
         on_usage: Callable[[Any, str], None] | None = None,
         deep_research_context: str | None = None,
+        provider: str | None = None,
+        reasoning_enabled: bool = False,
     ) -> None:
         """
         Initialize the evaluator.
@@ -60,6 +62,8 @@ class TrajectoryEvaluator:
             max_concurrency: Maximum concurrent LLM calls.
             on_usage: Callback for token usage tracking (completion, phase).
             deep_research_context: Optional research context to inform judging.
+            provider: Provider preference for OpenRouter (e.g., "Fireworks").
+            reasoning_enabled: Enable reasoning tokens for LLM calls.
         """
         self.llm = llm
         self.goal = goal
@@ -69,6 +73,8 @@ class TrajectoryEvaluator:
         self._sem = asyncio.Semaphore(max_concurrency)
         self._on_usage = on_usage
         self.deep_research_context = deep_research_context
+        self.provider = provider
+        self.reasoning_enabled = reasoning_enabled
 
     def set_research_context(self, context: str | None) -> None:
         """Set or update the deep research context for judging."""
@@ -166,14 +172,14 @@ class TrajectoryEvaluator:
         """Run 3 parallel judges on a single trajectory. Returns (score, critiques)."""
         history_str = format_message_history(node.messages)
 
-        prompt = prompts.trajectory_outcome_judge(
+        system_prompt, user_prompt = prompts.trajectory_outcome_judge(
             conversation_goal=self.goal,
             conversation_history=history_str,
             deep_research_context=self.deep_research_context,
         )
 
         # Run 3 judges in parallel
-        tasks = [self._call_llm_json(prompt) for _ in range(3)]
+        tasks = [self._call_llm_json(system_prompt, user_prompt) for _ in range(3)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         scores: list[float] = []
@@ -261,13 +267,13 @@ class TrajectoryEvaluator:
                 }
             )
 
-        prompt = prompts.comparative_trajectory_judge(
+        system_prompt, user_prompt = prompts.comparative_trajectory_judge(
             conversation_goal=self.goal,
             trajectories=trajectories,
             deep_research_context=self.deep_research_context,
         )
 
-        result = await self._call_llm_json(prompt)
+        result = await self._call_llm_json(system_prompt, user_prompt)
         scores_by_id: dict[str, AggregatedScore] = {}
 
         if not result or "ranking" not in result:
@@ -359,19 +365,29 @@ class TrajectoryEvaluator:
 
         return scores_by_id
 
-    async def _call_llm_json(self, prompt: str) -> dict[str, Any] | None:
+    async def _call_llm_json(
+        self, system_prompt: str, user_prompt: str
+    ) -> dict[str, Any] | None:
         """Make an LLM call expecting JSON output with retry."""
         async with self._sem:
-            return await self._call_llm_json_inner(prompt)
+            return await self._call_llm_json_inner(system_prompt, user_prompt)
 
     @llm_retry(max_attempts=3)
-    async def _call_llm_json_inner(self, prompt: str) -> dict[str, Any] | None:
+    async def _call_llm_json_inner(
+        self, system_prompt: str, user_prompt: str
+    ) -> dict[str, Any] | None:
         """Inner LLM call with retry logic."""
+        messages = [
+            Message.system(system_prompt),
+            Message.user(user_prompt),
+        ]
         completion = await self.llm.complete(
-            [Message.user(prompt)],
+            messages,
             model=self.model,
             temperature=self.judge_temperature,
             structured_output=True,
+            provider=self.provider,
+            reasoning_enabled=self.reasoning_enabled,
         )
         if self._on_usage:
             self._on_usage(completion, "judge")

@@ -30,6 +30,7 @@ class DTSConfig:
         deep_research: Whether to include deep research context.
         turns_per_branch: Number of turns (user+assistant) per expansion.
         user_intents_per_branch: Number of user intents to fork per expansion (1 = no forking).
+        user_variability: Generate diverse user intents. When False, uses fixed "healthily critical + engaged" persona.
         scoring_mode: "absolute" (3 independent judges) or "comparative" (forced ranking).
         prune_threshold: Score threshold for pruning (0-10).
         keep_top_k: Keep only top K branches after pruning (optional).
@@ -41,6 +42,8 @@ class DTSConfig:
         judge_model: Model for trajectory evaluation.
         temperature: Temperature for conversation generation.
         judge_temperature: Temperature for judge evaluations (lower = more deterministic).
+        reasoning_enabled: Enable reasoning tokens for LLM calls (increases cost but may improve quality).
+        provider: Provider preference for OpenRouter (e.g., "Fireworks").
     """
 
     goal: str
@@ -50,6 +53,7 @@ class DTSConfig:
     research_cache_dir: str = ".cache/research"
     turns_per_branch: int = 5
     user_intents_per_branch: int = 3
+    user_variability: bool = False  # When False, uses fixed "healthily critical + engaged" persona
     scoring_mode: ScoringMode = "comparative"
     prune_threshold: float = 6.5
     keep_top_k: int | None = None
@@ -61,3 +65,5 @@ class DTSConfig:
     judge_model: str | None = None
     temperature: float = 0.7
     judge_temperature: float = 0.3
+    reasoning_enabled: bool = False
+    provider: str | None = None  # Let OpenRouter choose the best provider

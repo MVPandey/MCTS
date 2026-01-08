@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useConfigStore, useSearchStore } from '@/stores';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useModels } from '@/hooks/useModels';
@@ -12,6 +12,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SelectGroup, SelectLabel } from '@/components/ui/select';
 import { ChevronDown, Play, Loader2, Settings } from 'lucide-react';
 import { formatNumber } from '@/lib/utils';
+import type { Model } from '@/types';
 
 export function ConfigForm() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -34,12 +35,16 @@ export function ConfigForm() {
     setRounds,
     userIntentsPerBranch,
     setUserIntentsPerBranch,
+    userVariability,
+    setUserVariability,
     pruneThreshold,
     setPruneThreshold,
     scoringMode,
     setScoringMode,
     deepResearch,
     setDeepResearch,
+    reasoningEnabled,
+    setReasoningEnabled,
     strategyModel,
     setStrategyModel,
     simulatorModel,
@@ -47,6 +52,26 @@ export function ConfigForm() {
     judgeModel,
     setJudgeModel,
   } = useConfigStore();
+
+  // Check if any selected model supports reasoning (from API)
+  const checkModelSupportsReasoning = useMemo(() => {
+    const modelIds = [strategyModel, simulatorModel, judgeModel, defaultModel].filter(Boolean);
+    if (modelIds.length === 0) return false;
+
+    // Check if any of the selected models support reasoning
+    return modelIds.some(id => {
+      const model = models.find((m: Model) => m.id === id);
+      return model?.supports_reasoning ?? false;
+    });
+  }, [strategyModel, simulatorModel, judgeModel, defaultModel, models]);
+
+  const isReasoningModelDetected = checkModelSupportsReasoning;
+
+  useEffect(() => {
+    if (isReasoningModelDetected && !reasoningEnabled) {
+      setReasoningEnabled(true);
+    }
+  }, [isReasoningModelDetected, reasoningEnabled, setReasoningEnabled]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -189,6 +214,27 @@ export function ConfigForm() {
                 <span className="ml-2 text-xs text-muted-foreground">{deepResearch ? 'On' : 'Off'}</span>
               </div>
             </div>
+            <div className="space-y-1">
+              <Label className="text-xs text-muted-foreground">
+                Reasoning
+                {isReasoningModelDetected && <span className="text-blue-500 ml-1">(auto)</span>}
+              </Label>
+              <div className="h-9 flex items-center">
+                <Switch
+                  checked={reasoningEnabled}
+                  onCheckedChange={setReasoningEnabled}
+                  disabled={isRunning || isReasoningModelDetected}
+                />
+                <span className="ml-2 text-xs text-muted-foreground">{reasoningEnabled ? 'On' : 'Off'}</span>
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs text-muted-foreground">User Variability</Label>
+              <div className="h-9 flex items-center">
+                <Switch checked={userVariability} onCheckedChange={setUserVariability} disabled={isRunning} />
+                <span className="ml-2 text-xs text-muted-foreground">{userVariability ? 'Diverse' : 'Fixed'}</span>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -203,18 +249,20 @@ export function ConfigForm() {
           <Card className="bg-background">
             <CardContent className="pt-4">
               <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">Intents/Branch</Label>
-                  <Input
-                    type="number"
-                    value={userIntentsPerBranch}
-                    onChange={(e) => setUserIntentsPerBranch(Number(e.target.value))}
-                    min={1}
-                    max={10}
-                    disabled={isRunning}
-                  />
-                </div>
-                <div className="space-y-1">
+                {userVariability && (
+                  <div className="space-y-1">
+                    <Label className="text-xs text-muted-foreground">Intents/Branch</Label>
+                    <Input
+                      type="number"
+                      value={userIntentsPerBranch}
+                      onChange={(e) => setUserIntentsPerBranch(Number(e.target.value))}
+                      min={1}
+                      max={10}
+                      disabled={isRunning}
+                    />
+                  </div>
+                )}
+                <div className={`space-y-1 ${!userVariability ? 'col-span-2' : ''}`}>
                   <Label className="text-xs text-muted-foreground">Prune Threshold</Label>
                   <Input
                     type="number"

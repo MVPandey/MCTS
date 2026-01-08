@@ -19,7 +19,7 @@ export const TreeNode = memo(function TreeNode({ data }: NodeProps<TreeNodeData>
   return (
     <div
       className={cn(
-        'px-3 py-2 rounded-lg border-2 min-w-[160px] max-w-[200px] bg-card transition-all duration-200',
+        'px-2 py-1.5 rounded-lg border-2 min-w-[140px] max-w-[180px] bg-card transition-all duration-200',
         statusStyles[status],
         isSelected && 'ring-2 ring-primary ring-offset-2 ring-offset-background',
         isBestPath && 'border-green-500 shadow-lg shadow-green-500/20'
@@ -31,19 +31,19 @@ export const TreeNode = memo(function TreeNode({ data }: NodeProps<TreeNodeData>
       )}
 
       {/* Strategy label */}
-      <div className="font-medium text-sm truncate text-foreground">{strategy || 'Root'}</div>
+      <div className="font-medium text-xs leading-tight text-foreground line-clamp-2">{strategy || 'Root'}</div>
 
       {/* User intent badge */}
       {userIntent && (
-        <Badge variant="outline" className="mt-1.5 text-xs truncate max-w-full">
+        <Badge variant="outline" className="mt-1 text-[10px] truncate max-w-full">
           {userIntent}
         </Badge>
       )}
 
       {/* Score bar */}
       {score !== null && (
-        <div className="mt-2">
-          <div className="flex justify-between text-xs mb-1">
+        <div className="mt-1.5">
+          <div className="flex justify-between text-[10px] mb-0.5">
             <span className="text-muted-foreground">Score</span>
             <span
               className={cn(

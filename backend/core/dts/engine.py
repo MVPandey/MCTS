@@ -98,6 +98,8 @@ class DTSEngine:
             temperature=config.temperature,
             max_concurrency=config.max_concurrency,
             on_usage=self._track_usage,
+            provider=config.provider,
+            reasoning_enabled=config.reasoning_enabled,
         )
 
         self._simulator = ConversationSimulator(
@@ -108,6 +110,8 @@ class DTSEngine:
             max_concurrency=config.max_concurrency,
             on_usage=self._track_usage,
             on_event=self._emit,
+            provider=config.provider,
+            reasoning_enabled=config.reasoning_enabled,
         )
 
         self._evaluator = TrajectoryEvaluator(
@@ -118,6 +122,8 @@ class DTSEngine:
             prune_threshold=config.prune_threshold,
             max_concurrency=config.max_concurrency,
             on_usage=self._track_usage,
+            provider=config.provider,
+            reasoning_enabled=config.reasoning_enabled,
         )
 
         self._researcher = DeepResearcher(
@@ -258,12 +264,30 @@ class DTSEngine:
                     "turns_per_branch": cfg.turns_per_branch,
                 },
             )
+            # Determine intent generation strategy
+            if cfg.user_variability:
+                # Generate diverse user intents via LLM
+                intents_per_node = cfg.user_intents_per_branch
+                generate_intents_fn = self._generator.generate_intents
+            else:
+                # Use fixed "healthily critical + engaged" persona (no API call)
+                from backend.core.dts.components.generator import FIXED_INTENT
+
+                intents_per_node = 1
+
+                async def fixed_intent_fn(
+                    history: list, count: int
+                ) -> list:
+                    return [FIXED_INTENT]
+
+                generate_intents_fn = fixed_intent_fn
+
             expanded = await self._simulator.expand_nodes(
                 expandable,
                 turns=cfg.turns_per_branch,
-                intents_per_node=cfg.user_intents_per_branch,
+                intents_per_node=intents_per_node,
                 tree=tree,
-                generate_intents=self._generator.generate_intents,
+                generate_intents=generate_intents_fn,
             )
             log_phase(
                 logger, "EXPAND", f"Completed {len(expanded)} expansions", indent=1

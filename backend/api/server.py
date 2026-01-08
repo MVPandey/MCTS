@@ -203,6 +203,10 @@ async def get_models() -> dict[str, Any]:
             prompt_cost = float(pricing.get("prompt", 0)) * 1_000_000  # per 1M tokens
             completion_cost = float(pricing.get("completion", 0)) * 1_000_000
 
+            # Check if model supports reasoning tokens
+            supported_params = model.get("supported_parameters", [])
+            supports_reasoning = "reasoning" in supported_params
+
             models.append(
                 {
                     "id": model.get("id"),
@@ -210,6 +214,7 @@ async def get_models() -> dict[str, Any]:
                     "context_length": model.get("context_length", 0),
                     "prompt_cost": round(prompt_cost, 4),
                     "completion_cost": round(completion_cost, 4),
+                    "supports_reasoning": supports_reasoning,
                 }
             )
 

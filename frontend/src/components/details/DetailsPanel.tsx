@@ -4,6 +4,7 @@ import { BranchSelector } from './BranchSelector';
 import { ConversationView } from './ConversationView';
 import { JudgeScores } from './JudgeScores';
 import { UsageStats } from './UsageStats';
+import { ResearchReport } from './ResearchReport';
 
 export function DetailsPanel() {
   const status = useSearchStore((s) => s.status);
@@ -28,6 +29,11 @@ export function DetailsPanel() {
     <div className="h-full flex flex-col bg-card border-l border-border">
       <ScrollArea className="flex-1">
         <div className="p-4 space-y-4">
+          {/* Research Report (if available) */}
+          {exploration?.research_report && (
+            <ResearchReport content={exploration.research_report} />
+          )}
+
           {/* Branch Selector */}
           {exploration && exploration.branches.length > 0 && <BranchSelector />}
 

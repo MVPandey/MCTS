@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Node, Edge } from 'reactflow';
-import type { NodeAddedData, NodeUpdatedData } from '@/types';
+import type { NodeAddedData, NodeUpdatedData, Branch } from '@/types';
 
 export interface TreeNodeData {
   id: string;
@@ -37,6 +37,7 @@ interface TreeState {
   setSelectedNode: (id: string | null) => void;
   setBestPath: (nodeId: string) => void;
   setLayoutDirection: (direction: 'TB' | 'LR') => void;
+  loadFromBranches: (branches: Branch[], bestNodeId?: string | null) => void;
   reset: () => void;
 }
 
@@ -190,6 +191,75 @@ export const useTreeStore = create<TreeState>((set, get) => ({
   },
 
   setLayoutDirection: (layoutDirection) => set({ layoutDirection }),
+
+  loadFromBranches: (branches, bestNodeId) => {
+    // Create root node
+    const rootId = 'imported-root';
+    const nodes: Node<TreeNodeData>[] = [
+      {
+        id: rootId,
+        type: 'treeNode',
+        position: { x: 0, y: 0 },
+        data: {
+          id: rootId,
+          parentId: null,
+          depth: 0,
+          status: 'scored',
+          strategy: null,
+          userIntent: null,
+          score: null,
+          individualScores: [],
+          passed: null,
+          messageCount: 0,
+          isSelected: false,
+          isBestPath: bestNodeId !== null,
+        },
+      },
+    ];
+
+    const edges: Edge[] = [];
+
+    // Create nodes for each branch
+    branches.forEach((branch) => {
+      const isBest = branch.id === bestNodeId;
+      const isPruned = branch.status === 'pruned';
+
+      nodes.push({
+        id: branch.id,
+        type: 'treeNode',
+        position: { x: 0, y: 0 },
+        data: {
+          id: branch.id,
+          parentId: rootId,
+          depth: branch.depth || 1,
+          status: isPruned ? 'pruned' : 'scored',
+          strategy: branch.strategy?.tagline || null,
+          userIntent: branch.user_intent?.label || null,
+          score: branch.scores?.aggregated ?? null,
+          individualScores: branch.scores?.individual || [],
+          passed: !isPruned,
+          messageCount: branch.trajectory?.length || 0,
+          isSelected: false,
+          isBestPath: isBest,
+        },
+      });
+
+      edges.push({
+        id: `${rootId}-${branch.id}`,
+        source: rootId,
+        target: branch.id,
+        type: 'treeEdge',
+        data: { isPruned, isBestPath: isBest },
+      });
+    });
+
+    set({
+      nodes,
+      edges,
+      rootId,
+      bestNodeId: bestNodeId || null,
+    });
+  },
 
   reset: () =>
     set({

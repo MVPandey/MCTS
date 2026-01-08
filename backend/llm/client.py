@@ -2,6 +2,7 @@
 # Imports
 # -----------------------------------------------------------------------------
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -22,6 +23,11 @@ from .errors import (
 )
 from .tools import Tool, ToolRegistry
 from .types import Completion, Function, Message, ToolCall, Usage
+
+# -----------------------------------------------------------------------------
+# Module Setup
+# -----------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # Class: LLM
@@ -83,6 +89,8 @@ class LLM:
         stop: list[str] | str | None = None,
         structured_output: bool = False,
         max_json_retries: int = 3,
+        provider: str | list[str] | None = None,
+        reasoning_enabled: bool | None = None,
         **kwargs: Any,
     ) -> Completion:
         """
@@ -98,6 +106,8 @@ class LLM:
             stop: Stop sequences.
             structured_output: If True, enforces JSON output and parses to dict.
             max_json_retries: Retries on JSON parse failure (default: 3).
+            provider: Provider preference for OpenRouter (e.g., "Fireworks" or ["Fireworks", "Together"]).
+            reasoning_enabled: Enable/disable reasoning tokens (OpenRouter). None = don't specify.
             **kwargs: Additional provider-specific parameters.
 
         Returns:
@@ -124,12 +134,24 @@ class LLM:
             stop=stop,
         )
 
+        # Build extra_body for OpenRouter-specific options (provider, reasoning)
+        extra_body: dict[str, Any] = kwargs.pop("extra_body", {})
+        if provider is not None:
+            order = [provider] if isinstance(provider, str) else provider
+            extra_body["provider"] = {"order": order, "allow_fallbacks": True}
+        # Only send reasoning param when enabled (some models error if reasoning: false)
+        if reasoning_enabled:
+            extra_body["reasoning"] = {"enabled": True}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
         if structured_output:
-            kwargs["response_format"] = {"type": "json_object"}
-            json_hint = {"role": "system", "content": "You must output valid JSON."}
-            request_params["messages"] = list[dict[str, Any]](prepared_messages) + [
-                json_hint
-            ]
+            # Skip response_format for reasoning models as it may conflict
+            # Instead, rely on prompt instructions to get JSON output
+            if not reasoning_enabled:
+                kwargs["response_format"] = {"type": "json_object"}
+            # Note: JSON output instructions are now included in system prompts,
+            # so no additional hint message is needed
 
         request_params.update(kwargs)
 
@@ -152,16 +174,34 @@ class LLM:
 
             if structured_output:
                 content = completion.message.content
+
+                # Check for reasoning field if content is empty (some models put content there)
                 if not content:
-                    last_error = JSONParseError("Empty response content")
+                    # Try to get content from reasoning field for reasoning models
+                    choice = response.choices[0] if response.choices else None
+                    if choice and hasattr(choice.message, "reasoning"):
+                        reasoning = choice.message.reasoning
+                        if reasoning:
+                            logger.warning(f"Content empty but found reasoning: {reasoning[:200]}...")
+
+                    last_error = JSONParseError(
+                        f"Empty response content. Model: {response.model}, "
+                        f"Finish reason: {completion.finish_reason}"
+                    )
                     if attempt < attempts - 1:
                         continue
                     raise last_error
 
+                # Strip reasoning tags (e.g., <think>...</think>) from content
+                content = self._strip_reasoning_tags(content)
+
+                # Try to extract JSON from content (handle markdown code blocks)
+                content = self._extract_json(content)
+
                 try:
                     completion.data = json.loads(content)
                 except json.JSONDecodeError as e:
-                    last_error = JSONParseError(f"Invalid JSON: {e}")
+                    last_error = JSONParseError(f"Invalid JSON: {e}\nContent: {content[:500]}")
                     if attempt < attempts - 1:
                         continue
                     raise last_error from e
@@ -178,6 +218,8 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         stop: list[str] | str | None = None,
+        provider: str | list[str] | None = None,
+        reasoning_enabled: bool | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         """
@@ -191,6 +233,8 @@ class LLM:
             tools: Tool definitions (note: tool calls in streaming are complex).
             tool_choice: Tool selection mode.
             stop: Stop sequences.
+            provider: Provider preference for OpenRouter (e.g., "Fireworks" or ["Fireworks", "Together"]).
+            reasoning_enabled: Enable/disable reasoning tokens (OpenRouter). None = don't specify.
             **kwargs: Additional parameters.
 
         Yields:
@@ -212,6 +256,18 @@ class LLM:
             stop=stop,
             stream=True,
         )
+
+        # Build extra_body for OpenRouter-specific options (provider, reasoning)
+        extra_body: dict[str, Any] = kwargs.pop("extra_body", {})
+        if provider is not None:
+            order = [provider] if isinstance(provider, str) else provider
+            extra_body["provider"] = {"order": order, "allow_fallbacks": True}
+        # Only send reasoning param when enabled (some models error if reasoning: false)
+        if reasoning_enabled:
+            extra_body["reasoning"] = {"enabled": True}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
         request_params.update(kwargs)
 
         try:
@@ -392,3 +448,36 @@ class LLM:
             return ServerError(message, status)
 
         return LLMError(message, status)
+
+    def _strip_reasoning_tags(self, content: str) -> str:
+        """Strip reasoning tags (e.g., <think>...</think>) from content."""
+        import re
+
+        # Remove <think>...</think> blocks (including multiline)
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+        # Remove <reasoning>...</reasoning> blocks
+        content = re.sub(r"<reasoning>.*?</reasoning>", "", content, flags=re.DOTALL)
+        return content.strip()
+
+    def _extract_json(self, content: str) -> str:
+        """Extract JSON from content, handling markdown code blocks."""
+        import re
+
+        # Try to extract from markdown code blocks first
+        # Match ```json ... ``` or ``` ... ```
+        json_block = re.search(r"```(?:json)?\s*([\s\S]*?)```", content)
+        if json_block:
+            return json_block.group(1).strip()
+
+        # Try to find JSON object or array directly
+        # Look for content starting with { or [
+        content = content.strip()
+        if content.startswith("{") or content.startswith("["):
+            return content
+
+        # Try to find JSON anywhere in the content
+        json_match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", content)
+        if json_match:
+            return json_match.group(1)
+
+        return content

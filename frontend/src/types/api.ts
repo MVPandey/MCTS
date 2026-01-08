@@ -7,10 +7,12 @@ export interface SearchRequest {
   init_branches: number;
   turns_per_branch: number;
   user_intents_per_branch: number;
+  user_variability: boolean;
   scoring_mode: 'absolute' | 'comparative';
   prune_threshold: number;
   rounds: number;
   deep_research: boolean;
+  reasoning_enabled: boolean;
   strategy_model: string | null;
   simulator_model: string | null;
   judge_model: string | null;
@@ -23,6 +25,7 @@ export interface Model {
   context_length: number;
   prompt_cost: number;
   completion_cost: number;
+  supports_reasoning: boolean;
 }
 
 export interface ModelsResponse {

@@ -43,20 +43,24 @@ class Config(BaseSettings):
             self.openrouter_api_key = self.openai_api_key
         return self
 
-    llm_name: str = Field(default="z-ai/glm-4.7", description="LLM model name")
+    llm_name: str = Field(default="minimax/minimax-m2.1", description="LLM model name")
 
     # --- These are for deep researcher ---
     fast_llm: str = Field(
-        default="openrouter:bytedance-seed/seed-1.6-flash",
+        default="openrouter:minimax/minimax-m2.1",
         description="Fast LLM model name",
     )
     smart_llm: str = Field(
-        default="openrouter:google/gemini-2.0-flash-001",
+        default="openrouter:minimax/minimax-m2.1",
         description="Smart LLM model name",
     )
     strategic_llm: str = Field(
         default="openrouter:minimax/minimax-m2.1",
         description="Strategic LLM model name",
+    )
+    reasoning_enabled: bool = Field(
+        default=False,
+        description="Enable reasoning tokens for LLM calls (increases cost but may improve quality)",
     )
 
     firecrawl_api_key: str = Field(

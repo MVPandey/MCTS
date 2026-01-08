@@ -90,6 +90,8 @@ class ConversationSimulator:
         max_concurrency: int = 16,
         on_usage: Callable[[Any, str], None] | None = None,
         on_event: Callable[[str, dict[str, Any]], Any] | None = None,
+        provider: str | None = None,
+        reasoning_enabled: bool = False,
     ) -> None:
         """
         Initialize the simulator.
@@ -102,6 +104,8 @@ class ConversationSimulator:
             max_concurrency: Maximum concurrent LLM calls.
             on_usage: Callback for token usage tracking (completion, phase).
             on_event: Async callback for emitting events to UI.
+            provider: Provider preference for OpenRouter (e.g., "Fireworks").
+            reasoning_enabled: Enable reasoning tokens for LLM calls.
         """
         self.llm = llm
         self.goal = goal
@@ -110,6 +114,8 @@ class ConversationSimulator:
         self._sem = asyncio.Semaphore(max_concurrency)
         self._on_usage = on_usage
         self._on_event = on_event
+        self.provider = provider
+        self.reasoning_enabled = reasoning_enabled
 
     # --- Public Methods ---
 
@@ -392,7 +398,7 @@ class ConversationSimulator:
         This modifies the original message to reflect the intent's emotional
         tone and cognitive stance while preserving the core request/goal.
         """
-        system_prompt = prompts.rephrase_with_intent(
+        system_prompt, user_prompt = prompts.rephrase_with_intent(
             original_message=original_message,
             intent_label=intent.label,
             intent_description=intent.description,
@@ -400,7 +406,7 @@ class ConversationSimulator:
             cognitive_stance=intent.cognitive_stance,
         )
 
-        messages = [Message.system(system_prompt), Message.user(original_message)]
+        messages = [Message.system(system_prompt), Message.user(user_prompt)]
         return await self._call_llm_with_retry(messages, phase="rephrase")
 
     async def _simulate_user(
@@ -418,12 +424,13 @@ class ConversationSimulator:
                 "cognitive_stance": intent.cognitive_stance,
             }
 
-        system_prompt = prompts.user_simulation(
+        system_prompt, user_prompt = prompts.user_simulation(
             conversation_goal=self.goal,
             user_intent=intent_dict,
         )
 
-        messages = [Message.system(system_prompt)] + history
+        # System prompt + conversation history + continuation request
+        messages = [Message.system(system_prompt)] + history + [Message.user(user_prompt)]
         return await self._call_llm_with_retry(messages, phase="user")
 
     async def _generate_assistant(
@@ -432,13 +439,14 @@ class ConversationSimulator:
         strategy: Strategy | None,
     ) -> str:
         """Generate an assistant response with retry on empty responses."""
-        system_prompt = prompts.assistant_continuation(
+        system_prompt, user_prompt = prompts.assistant_continuation(
             conversation_goal=self.goal,
             strategy_tagline=strategy.tagline if strategy else "",
             strategy_description=strategy.description if strategy else "",
         )
 
-        messages = [Message.system(system_prompt)] + history
+        # System prompt + conversation history + continuation request
+        messages = [Message.system(system_prompt)] + history + [Message.user(user_prompt)]
         return await self._call_llm_with_retry(messages, phase="assistant")
 
     async def _call_llm_with_retry(
@@ -506,6 +514,8 @@ class ConversationSimulator:
                 messages,
                 model=self.model,
                 temperature=self.temperature,
+                provider=self.provider,
+                reasoning_enabled=self.reasoning_enabled,
             )
             if self._on_usage:
                 self._on_usage(completion, phase)
