@@ -559,22 +559,6 @@ Once the server is running:
 | `reasoning_enabled` | `bool` | `False` | Enable reasoning tokens for LLM calls (increases cost but may improve quality) |
 | `provider` | `str \| None` | `None` | Provider preference for OpenRouter (e.g., "Fireworks") |
 
-### Per-Phase Model Overrides
-
-Use different models for different phases to optimize cost/quality:
-
-```python
-DTSConfig(
-    goal="...",
-    first_message="...",
-    strategy_model="anthropic/claude-3-opus",  # Best for strategy
-    simulator_model="openai/gpt-4o-mini",       # Fast for simulation
-    judge_model="google/gemini-1.5-pro",        # Balanced for judging
-)
-```
-
----
-
 ## Deep Research Integration
 
 DTS integrates [GPT-Researcher](https://github.com/assafelovic/gpt-researcher) to gather domain context before generating strategies.
